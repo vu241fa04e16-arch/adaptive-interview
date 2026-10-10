@@ -5,7 +5,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import AsyncOllamaClient, get_db, get_ollama_client, get_resume_service
+from app.api.deps import (
+    AsyncOllamaClient,
+    get_adaptive_engine,
+    get_db,
+    get_ollama_client,
+    get_resume_service,
+)
 from app.config import get_settings
 from app.core.exceptions import InvalidSessionStateException, ResourceNotFoundException
 from app.core.logging import logger
@@ -13,12 +19,14 @@ from app.database import check_database_health
 from app.models.resume import ResumeAnalysis
 from app.models.session import InterviewSession
 from app.schemas.health import DatabaseHealth, HealthResponse, OllamaHealth
+from app.schemas.question import QuestionResponse
 from app.schemas.resume import (
     ClaimedSkill,
     ProjectSummary,
     ResumeUploadResponse,
 )
 from app.schemas.session import SessionCreateRequest, SessionResponse
+from app.services.adaptive_engine import AdaptiveEngine
 from app.services.resume_service import ResumeService
 
 router = APIRouter(prefix="/api", tags=["Interview Intelligence"])
@@ -262,17 +270,52 @@ async def upload_resume(
     )
 
 
-# Exact Endpoints - Subsequent phases remain reserved
+# Exact Endpoints - Adaptive Question Generation (Phase 3)
 @router.get(
     "/sessions/{sessionId}/next-question",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+    response_model=QuestionResponse,
     summary="Adaptive Question Generation",
+    description="Selects and generates the next interview question tailored adaptively to candidate state.",
 )
-async def get_next_question(sessionId: str):
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Endpoint scheduled for Phase 3 implementation (Adaptive Question Generator).",
+async def get_next_question(
+    sessionId: str,
+    db: AsyncSession = Depends(get_db),
+    adaptive_engine: AdaptiveEngine = Depends(get_adaptive_engine),
+) -> QuestionResponse:
+    """Generates the next interview question based on role, resume, assessed competencies, and difficulty."""
+    # 1. Validate UUID format
+    try:
+        session_uuid = uuid.UUID(sessionId)
+    except (ValueError, AttributeError):
+        raise InvalidSessionStateException(
+            message=f"Invalid sessionId format '{sessionId}'. Must be a valid UUID.",
+            details={"sessionId": sessionId},
+        )
+
+    # 2. Query session with questions and resume analysis
+    result = await db.execute(
+        select(InterviewSession)
+        .options(
+            selectinload(InterviewSession.questions),
+            selectinload(InterviewSession.resume_analysis),
+        )
+        .where(InterviewSession.id == session_uuid)
     )
+    session = result.scalar_one_or_none()
+
+    if session is None:
+        raise ResourceNotFoundException(
+            resource="InterviewSession",
+            resource_id=sessionId,
+        )
+
+    # 3. Generate adaptive question and persist in DB
+    question_response = await adaptive_engine.generate_next_question(
+        session=session,
+        db=db,
+    )
+
+    return question_response
 
 
 @router.post(

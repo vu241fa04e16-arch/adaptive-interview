@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from sqlalchemy import DateTime, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -10,6 +10,7 @@ from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.resume import ResumeAnalysis
+    from app.models.question import Question
 
 
 class InterviewSession(Base):
@@ -37,6 +38,10 @@ class InterviewSession(Base):
         server_default="{}",
     )
 
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -54,6 +59,13 @@ class InterviewSession(Base):
         back_populates="session",
         uselist=False,
         cascade="all, delete-orphan",
+    )
+    questions: Mapped[List["Question"]] = relationship(
+        "Question",
+        back_populates="session",
+        uselist=True,
+        cascade="all, delete-orphan",
+        order_by="Question.sequence_number",
     )
 
     def __repr__(self) -> str:

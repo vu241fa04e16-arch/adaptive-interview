@@ -7,6 +7,11 @@ from app.schemas.resume import (
     ResumeAnalysisLLMOutput,
     ResumeUploadResponse,
 )
+from app.schemas.question import (
+    AdaptationContext,
+    QuestionResponse,
+    GeneratedQuestionLLM,
+)
 
 __all__ = [
     "HealthResponse",
@@ -19,4 +24,7 @@ __all__ = [
     "ProjectSummary",
     "ResumeAnalysisLLMOutput",
     "ResumeUploadResponse",
+    "AdaptationContext",
+    "QuestionResponse",
+    "GeneratedQuestionLLM",
 ]

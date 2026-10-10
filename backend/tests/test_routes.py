@@ -29,10 +29,9 @@ def test_endpoint_lifecycle_and_unimplemented_contract(client: TestClient, mock_
     )
     assert resp.status_code == 400
 
-    # 4. GET /api/sessions/{sessionId}/next-question (501 Phase 3)
-    resp = client.get("/api/sessions/test-id/next-question")
-    assert resp.status_code == 501
-    assert "Phase 3" in resp.json()["detail"]
+    # 4. GET /api/sessions/{sessionId}/next-question (Active Phase 3 - returns 400 on invalid UUID)
+    resp = client.get("/api/sessions/invalid-id/next-question")
+    assert resp.status_code == 400
 
     # 5. POST /api/sessions/{sessionId}/answers (501 Phase 4)
     resp = client.post("/api/sessions/test-id/answers", json={})
