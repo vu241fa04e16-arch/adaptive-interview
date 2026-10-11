@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -10,6 +10,7 @@ from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.session import InterviewSession
+    from app.models.answer import Answer
 
 
 class Question(Base):
@@ -46,6 +47,12 @@ class Question(Base):
     session: Mapped["InterviewSession"] = relationship(
         "InterviewSession",
         back_populates="questions",
+    )
+    answer: Mapped[Optional["Answer"]] = relationship(
+        "Answer",
+        back_populates="question",
+        uselist=False,
+        cascade="all, delete-orphan",
     )
 
     def __repr__(self) -> str:

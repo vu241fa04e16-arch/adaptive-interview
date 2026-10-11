@@ -11,6 +11,8 @@ from app.database import Base
 if TYPE_CHECKING:
     from app.models.resume import ResumeAnalysis
     from app.models.question import Question
+    from app.models.answer import Answer
+    from app.models.event import SessionEvent
 
 
 class InterviewSession(Base):
@@ -42,6 +44,10 @@ class InterviewSession(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -66,6 +72,20 @@ class InterviewSession(Base):
         uselist=True,
         cascade="all, delete-orphan",
         order_by="Question.sequence_number",
+    )
+    answers: Mapped[List["Answer"]] = relationship(
+        "Answer",
+        back_populates="session",
+        uselist=True,
+        cascade="all, delete-orphan",
+        order_by="Answer.created_at",
+    )
+    events: Mapped[List["SessionEvent"]] = relationship(
+        "SessionEvent",
+        back_populates="session",
+        uselist=True,
+        cascade="all, delete-orphan",
+        order_by="SessionEvent.created_at",
     )
 
     def __repr__(self) -> str:

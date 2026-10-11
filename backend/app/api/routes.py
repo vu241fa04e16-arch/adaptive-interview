@@ -9,17 +9,25 @@ from app.api.deps import (
     AsyncOllamaClient,
     get_adaptive_engine,
     get_db,
+    get_evaluation_service,
     get_ollama_client,
+    get_report_service,
     get_resume_service,
 )
 from app.config import get_settings
 from app.core.exceptions import InvalidSessionStateException, ResourceNotFoundException
 from app.core.logging import logger
 from app.database import check_database_health
+from app.models.answer import Answer
+from app.models.event import SessionEvent
+from app.models.question import Question
 from app.models.resume import ResumeAnalysis
 from app.models.session import InterviewSession
+from app.schemas.answer import AnswerResponse, AnswerSubmitRequest
+from app.schemas.event import EventCreateRequest, EventResponse, InterviewProgress
 from app.schemas.health import DatabaseHealth, HealthResponse, OllamaHealth
 from app.schemas.question import QuestionResponse
+from app.schemas.report import InterviewReportResponse, SessionCompleteResponse
 from app.schemas.resume import (
     ClaimedSkill,
     ProjectSummary,
@@ -27,6 +35,8 @@ from app.schemas.resume import (
 )
 from app.schemas.session import SessionCreateRequest, SessionResponse
 from app.services.adaptive_engine import AdaptiveEngine
+from app.services.evaluation_service import EvaluationService
+from app.services.report_service import ReportService
 from app.services.resume_service import ResumeService
 
 router = APIRouter(prefix="/api", tags=["Interview Intelligence"])
@@ -320,47 +330,273 @@ async def get_next_question(
 
 @router.post(
     "/sessions/{sessionId}/answers",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+    response_model=AnswerResponse,
+    status_code=status.HTTP_200_OK,
     summary="Submit and Evaluate Candidate Answer",
+    description="Accepts candidate answer, evaluates it against role and criteria with Ollama, updates competency state.",
 )
-async def submit_answer(sessionId: str):
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Endpoint scheduled for Phase 4 implementation (Real-time Evaluation).",
+async def submit_answer(
+    sessionId: str,
+    payload: AnswerSubmitRequest,
+    db: AsyncSession = Depends(get_db),
+    evaluation_service: EvaluationService = Depends(get_evaluation_service),
+) -> AnswerResponse:
+    """Validates session and question, runs real-time rubric AI evaluation, updates competency state."""
+    # 1. Validate sessionId format
+    try:
+        session_uuid = uuid.UUID(sessionId)
+    except (ValueError, AttributeError):
+        raise InvalidSessionStateException(
+            message=f"Invalid sessionId format '{sessionId}'. Must be a valid UUID.",
+            details={"sessionId": sessionId},
+        )
+
+    # 2. Validate question_id format
+    try:
+        question_uuid = uuid.UUID(payload.question_id)
+    except (ValueError, AttributeError):
+        raise InvalidSessionStateException(
+            message=f"Invalid question_id format '{payload.question_id}'. Must be a valid UUID.",
+            details={"question_id": payload.question_id},
+        )
+
+    # 3. Retrieve session
+    result = await db.execute(
+        select(InterviewSession).where(InterviewSession.id == session_uuid)
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise ResourceNotFoundException(
+            resource="InterviewSession",
+            resource_id=sessionId,
+        )
+
+    # 4. Validate session state
+    if session.status in ["completed", "abandoned"]:
+        raise InvalidSessionStateException(
+            message=f"Cannot submit answer: session is already '{session.status}'.",
+            details={"sessionId": sessionId, "status": session.status},
+        )
+
+    # 5. Retrieve question belonging to this session
+    q_result = await db.execute(
+        select(Question).where(
+            Question.id == question_uuid,
+            Question.session_id == session_uuid,
+        )
+    )
+    question = q_result.scalar_one_or_none()
+    if question is None:
+        raise ResourceNotFoundException(
+            resource="Question",
+            resource_id=payload.question_id,
+        )
+
+    # 6. Evaluate and persist answer
+    return await evaluation_service.evaluate_and_save_answer(
+        session=session,
+        question=question,
+        answer_payload=payload,
+        db=db,
     )
 
 
 @router.post(
     "/sessions/{sessionId}/events",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-    summary="Stream Integrity Analytics Telemetry",
+    response_model=EventResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Record Session Telemetry and Integrity Events",
+    description="Persists interview events (tab switches, blurs, warnings) and tracks real-time progress.",
 )
-async def record_events(sessionId: str):
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Endpoint scheduled for Phase 5 implementation (Integrity Intelligence).",
+async def record_events(
+    sessionId: str,
+    payload: EventCreateRequest,
+    db: AsyncSession = Depends(get_db),
+) -> EventResponse:
+    """Persists session telemetry events, tracks questions/answers progress, returns current session state."""
+    # 1. Validate sessionId format
+    try:
+        session_uuid = uuid.UUID(sessionId)
+    except (ValueError, AttributeError):
+        raise InvalidSessionStateException(
+            message=f"Invalid sessionId format '{sessionId}'. Must be a valid UUID.",
+            details={"sessionId": sessionId},
+        )
+
+    # 2. Retrieve session with questions and answers
+    result = await db.execute(
+        select(InterviewSession)
+        .options(
+            selectinload(InterviewSession.questions),
+            selectinload(InterviewSession.answers),
+        )
+        .where(InterviewSession.id == session_uuid)
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise ResourceNotFoundException(
+            resource="InterviewSession",
+            resource_id=sessionId,
+        )
+
+    # 3. Validate session state
+    if session.status in ["completed", "abandoned"]:
+        raise InvalidSessionStateException(
+            message=f"Cannot record events: session is already '{session.status}'.",
+            details={"sessionId": sessionId, "status": session.status},
+        )
+
+    # 4. Validate event_type
+    clean_event_type = payload.event_type.strip()
+    if len(clean_event_type) < 2:
+        raise InvalidSessionStateException(
+            message="Event type must be at least 2 characters long.",
+            details={"event_type": payload.event_type},
+        )
+
+    # 5. Persist event
+    event_timestamp = payload.timestamp or datetime.now(timezone.utc)
+    new_event = SessionEvent(
+        session_id=session.id,
+        event_type=clean_event_type,
+        event_data=payload.event_data,
+        timestamp=event_timestamp,
+    )
+    db.add(new_event)
+    await db.commit()
+    await db.refresh(new_event)
+
+    # 6. Compute progress
+    now = datetime.now(timezone.utc)
+    if session.started_at is None:
+        time_rem = session.time_limit_minutes * 60
+    else:
+        elapsed = (now - session.started_at).total_seconds()
+        time_rem = max(0, int(session.time_limit_minutes * 60 - elapsed))
+
+    questions_count = len(session.questions) if session.questions else 0
+    answers_count = len(session.answers) if session.answers else 0
+
+    return EventResponse(
+        sessionId=str(session.id),
+        event_id=str(new_event.id),
+        event_type=new_event.event_type,
+        timestamp=new_event.timestamp,
+        progress=InterviewProgress(
+            questions_asked=questions_count,
+            answers_submitted=answers_count,
+            current_status=session.status,
+            time_remaining_seconds=time_rem,
+        ),
     )
 
 
 @router.post(
     "/sessions/{sessionId}/complete",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+    response_model=SessionCompleteResponse,
+    status_code=status.HTTP_200_OK,
     summary="Complete Interview Session",
+    description="Marks session as completed, records completion timestamp, returns interview completion summary.",
 )
-async def complete_session(sessionId: str):
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Endpoint scheduled for Phase 5 implementation (Decision Reporting).",
+async def complete_session(
+    sessionId: str,
+    db: AsyncSession = Depends(get_db),
+) -> SessionCompleteResponse:
+    """Validates session, updates status to completed, prevents further activity, calculates summary metrics."""
+    # 1. Validate sessionId format
+    try:
+        session_uuid = uuid.UUID(sessionId)
+    except (ValueError, AttributeError):
+        raise InvalidSessionStateException(
+            message=f"Invalid sessionId format '{sessionId}'. Must be a valid UUID.",
+            details={"sessionId": sessionId},
+        )
+
+    # 2. Retrieve session with questions and answers
+    result = await db.execute(
+        select(InterviewSession)
+        .options(
+            selectinload(InterviewSession.questions),
+            selectinload(InterviewSession.answers),
+        )
+        .where(InterviewSession.id == session_uuid)
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise ResourceNotFoundException(
+            resource="InterviewSession",
+            resource_id=sessionId,
+        )
+
+    # 3. Handle repeated completion consistently (idempotency)
+    now = datetime.now(timezone.utc)
+    if session.status != "completed":
+        session.status = "completed"
+        if session.completed_at is None:
+            session.completed_at = now
+        await db.commit()
+        await db.refresh(session)
+        logger.info(f"Interview session {sessionId} transitioned to 'completed' at {session.completed_at}")
+
+    # 4. Calculate metrics from saved answers
+    total_questions = len(session.questions) if session.questions else 0
+    total_answers = len(session.answers) if session.answers else 0
+    avg_score = (
+        round(sum(a.score for a in session.answers) / total_answers, 2)
+        if total_answers > 0
+        else None
+    )
+
+    return SessionCompleteResponse(
+        sessionId=str(session.id),
+        status=session.status,
+        completed_at=session.completed_at or now,
+        total_questions=total_questions,
+        total_answers=total_answers,
+        average_score=avg_score,
+        message="Interview session completed successfully.",
     )
 
 
 @router.get(
     "/sessions/{sessionId}/report",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+    response_model=InterviewReportResponse,
+    status_code=status.HTTP_200_OK,
     summary="Retrieve Comprehensive Decision Report",
+    description="Compiles deterministic candidate decision report from persisted session, questions, answers, and telemetry.",
 )
-async def get_report(sessionId: str):
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Endpoint scheduled for Phase 5 implementation (Decision Reporting).",
+async def get_report(
+    sessionId: str,
+    db: AsyncSession = Depends(get_db),
+    report_service: ReportService = Depends(get_report_service),
+) -> InterviewReportResponse:
+    """Builds comprehensive evaluation decision report deterministically from database records."""
+    # 1. Validate sessionId format
+    try:
+        session_uuid = uuid.UUID(sessionId)
+    except (ValueError, AttributeError):
+        raise InvalidSessionStateException(
+            message=f"Invalid sessionId format '{sessionId}'. Must be a valid UUID.",
+            details={"sessionId": sessionId},
+        )
+
+    # 2. Retrieve session with all related data
+    result = await db.execute(
+        select(InterviewSession)
+        .options(
+            selectinload(InterviewSession.resume_analysis),
+            selectinload(InterviewSession.questions).selectinload(Question.answer),
+            selectinload(InterviewSession.answers),
+            selectinload(InterviewSession.events),
+        )
+        .where(InterviewSession.id == session_uuid)
     )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise ResourceNotFoundException(
+            resource="InterviewSession",
+            resource_id=sessionId,
+        )
+
+    # 3. Generate deterministic report
+    return report_service.generate_report(session)

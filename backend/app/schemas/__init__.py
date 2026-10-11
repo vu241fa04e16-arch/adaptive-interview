@@ -12,6 +12,25 @@ from app.schemas.question import (
     QuestionResponse,
     GeneratedQuestionLLM,
 )
+from app.schemas.answer import (
+    AnswerSubmitRequest,
+    AnswerEvaluationLLM,
+    AnswerResponse,
+)
+from app.schemas.event import (
+    EventCreateRequest,
+    InterviewProgress,
+    EventResponse,
+)
+from app.schemas.report import (
+    SessionCompleteResponse,
+    AnswerDetail,
+    QuestionWithAnswer,
+    CompetencyPerformance,
+    IntegritySummary,
+    ReportSummaryMetrics,
+    InterviewReportResponse,
+)
 
 __all__ = [
     "HealthResponse",
@@ -27,4 +46,17 @@ __all__ = [
     "AdaptationContext",
     "QuestionResponse",
     "GeneratedQuestionLLM",
+    "AnswerSubmitRequest",
+    "AnswerEvaluationLLM",
+    "AnswerResponse",
+    "EventCreateRequest",
+    "InterviewProgress",
+    "EventResponse",
+    "SessionCompleteResponse",
+    "AnswerDetail",
+    "QuestionWithAnswer",
+    "CompetencyPerformance",
+    "IntegritySummary",
+    "ReportSummaryMetrics",
+    "InterviewReportResponse",
 ]
