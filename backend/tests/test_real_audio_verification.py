@@ -15,6 +15,8 @@ async def test_real_audio_transcription_end_to_end():
     temp_wav = os.path.join(tempfile.gettempdir(), "test_real_stt_verification.wav")
     try:
         import win32com.client
+    except ImportError:
+        pytest.skip("win32com.client is not installed on this system.")
 
         # Generate real spoken audio via system speech synthesizer
         speaker = win32com.client.Dispatch("SAPI.SpVoice")

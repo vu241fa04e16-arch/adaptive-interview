@@ -7,10 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import (
+    AsyncGroqClient,
     AsyncOllamaClient,
     get_adaptive_engine,
     get_db,
     get_evaluation_service,
+    get_groq_client,
     get_ollama_client,
     get_report_service,
     get_resume_service,
@@ -33,7 +35,7 @@ from app.models.resume import ResumeAnalysis
 from app.models.session import InterviewSession
 from app.schemas.answer import AnswerResponse, AnswerSubmitRequest, AudioAnswerResponse
 from app.schemas.event import EventCreateRequest, EventResponse, InterviewProgress
-from app.schemas.health import DatabaseHealth, HealthResponse, OllamaHealth
+from app.schemas.health import AIHealth, DatabaseHealth, HealthResponse, OllamaHealth
 from app.schemas.question import QuestionResponse
 from app.schemas.report import InterviewReportResponse, SessionCompleteResponse
 from app.schemas.resume import (
@@ -58,25 +60,34 @@ settings = get_settings()
     "/health",
     response_model=HealthResponse,
     summary="System Health and Readiness Probe",
-    description="Probes PostgreSQL database connectivity and local Ollama model readiness.",
+    description="Probes PostgreSQL database connectivity and Groq AI service readiness.",
 )
 async def get_health(
-    ollama_client: AsyncOllamaClient = Depends(get_ollama_client),
+    ai_client: AsyncGroqClient = Depends(get_groq_client),
 ) -> HealthResponse:
-    """Probes separate application, database, and Ollama health."""
+    """Probes separate application, database, and Groq AI provider health."""
     db_info = await check_database_health()
-    ollama_info = await ollama_client.check_health()
+    ai_info = await ai_client.check_health()
 
     # Determine overall status
     is_db_ok = db_info.get("status") == "connected"
-    is_ollama_ok = ollama_info.get("status") == "available" and ollama_info.get("model_available", False)
+    is_ai_ok = ai_info.get("status") == "available" and ai_info.get("model_available", False)
 
-    if is_db_ok and is_ollama_ok:
+    if is_db_ok and is_ai_ok:
         overall_status = "healthy"
-    elif is_db_ok and not is_ollama_ok:
+    elif is_db_ok and not is_ai_ok:
         overall_status = "degraded"
     else:
         overall_status = "unhealthy"
+
+    ai_health = AIHealth(
+        status=ai_info.get("status", "unavailable"),
+        base_url=ai_info.get("base_url", settings.GROQ_BASE_URL),
+        configured_model=ai_info.get("configured_model", settings.GROQ_MODEL),
+        model_available=ai_info.get("model_available", False),
+        available_models=ai_info.get("available_models"),
+        error=ai_info.get("error"),
+    )
 
     return HealthResponse(
         status=overall_status,
@@ -89,14 +100,8 @@ async def get_health(
             driver=db_info.get("driver"),
             error=db_info.get("error"),
         ),
-        ollama=OllamaHealth(
-            status=ollama_info.get("status", "unavailable"),
-            base_url=ollama_info.get("base_url", settings.OLLAMA_BASE_URL),
-            configured_model=ollama_info.get("configured_model", settings.OLLAMA_MODEL),
-            model_available=ollama_info.get("model_available", False),
-            available_models=ollama_info.get("available_models"),
-            error=ollama_info.get("error"),
-        ),
+        ollama=ai_health,
+        groq=ai_health,
     )
 
 

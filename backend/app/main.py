@@ -10,7 +10,7 @@ from app.api.routes import router
 from app.config import get_settings
 from app.core.exceptions import AppException
 from app.core.logging import logger
-from app.core.ollama_client import get_ollama_client
+from app.core.groq_client import get_groq_client
 from app.database import engine
 
 settings = get_settings()
@@ -20,26 +20,26 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup warmup and graceful shutdown."""
     logger.info(f"Starting {settings.PROJECT_NAME} in [{settings.ENVIRONMENT}] mode...")
-    logger.info(f"Ollama configured at: {settings.OLLAMA_BASE_URL} (Model: {settings.OLLAMA_MODEL})")
+    logger.info(f"Groq API configured at: {settings.GROQ_BASE_URL} (Model: {settings.GROQ_MODEL})")
     logger.info(f"Database target: {settings.DATABASE_URL.split('@')[-1] if '@' in settings.DATABASE_URL else 'configured'}")
 
-    # Warmup / probe Ollama asynchronously
-    ollama_client = get_ollama_client()
+    # Warmup / probe Groq API asynchronously
+    groq_client = get_groq_client()
     try:
-        health = await ollama_client.check_health()
+        health = await groq_client.check_health()
         if health.get("status") == "available":
             model_status = "READY" if health.get("model_available") else "MODEL NOT FOUND"
-            logger.info(f"Ollama connection verified. Configured model status: {model_status}")
+            logger.info(f"Groq API connection verified. Configured model status: {model_status}")
         else:
-            logger.warning(f"Ollama connection warning: {health.get('error')}")
+            logger.warning(f"Groq API connection notice: {health.get('error')}")
     except Exception as e:
-        logger.warning(f"Ollama initial health check encountered an error: {e}")
+        logger.warning(f"Groq API initial health probe encountered an error: {e}")
 
     yield
 
     # Graceful shutdown
     logger.info("Initiating graceful shutdown...")
-    await ollama_client.aclose()
+    await groq_client.aclose()
     await engine.dispose()
     logger.info("Application resources successfully disposed.")
 

@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import logger
-from app.core.ollama_client import AsyncOllamaClient
+from app.core.groq_client import AsyncGroqClient
 from app.models.session import InterviewSession
 from app.schemas.skill_gap import RequiredSkillItem, SkillGapReport
 
@@ -32,8 +32,14 @@ class JDExtractionLLM(BaseModel):
 class SkillGapService:
     """Performs Resume–JD Skill Gap Analysis, comparing job requirements against resume claims and interview evidence."""
 
-    def __init__(self, ollama_client: Optional[AsyncOllamaClient] = None):
-        self.ollama = ollama_client
+    def __init__(
+        self,
+        ai_client: Optional[AsyncGroqClient] = None,
+        ollama_client: Optional[AsyncGroqClient] = None,
+    ):
+        client = ai_client or ollama_client
+        self.ai_client = client
+        self.ollama = client
 
     # Common engineering competency benchmarks for fallback or when no explicit JD is provided
     ROLE_BENCHMARKS = {
@@ -65,8 +71,9 @@ class SkillGapService:
         target_role: str,
         target_level: str,
     ) -> List[Dict[str, str]]:
-        """Extracts required skills from JD text using Ollama, with robust deterministic fallback."""
-        if self.ollama:
+        """Extracts required skills from JD text using Groq AI, with robust deterministic fallback."""
+        client = self.ai_client or self.ollama
+        if client:
             try:
                 system_prompt = (
                     "You are a technical recruiting architect analyzing a technical job description.\n"
@@ -78,11 +85,11 @@ class SkillGapService:
                     f"JOB DESCRIPTION:\n{job_description[:3000]}\n\n"
                     "Extract required skills, preferred skills, and summary."
                 )
-                extracted: JDExtractionLLM = await self.ollama.generate_structured(
+                extracted: JDExtractionLLM = await client.generate_structured(
                     prompt=prompt,
                     schema=JDExtractionLLM,
                     system_prompt=system_prompt,
-                    options={"temperature": 0.1, "num_predict": 300},
+                    options={"temperature": 0.1, "max_tokens": 400},
                 )
                 skills: List[Dict[str, str]] = []
                 for s in extracted.required_skills:
@@ -94,7 +101,7 @@ class SkillGapService:
                 if skills:
                     return skills
             except Exception as e:
-                logger.warning(f"Ollama JD extraction failed, using deterministic extractor: {e}")
+                logger.warning(f"Groq JD extraction failed, using deterministic extractor: {e}")
 
         # Deterministic extraction fallback: parse bullet points and recognized technical skills
         return self._deterministic_extract_jd_skills(job_description, target_role)

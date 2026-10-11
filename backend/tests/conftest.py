@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 # Ensure backend root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.api.deps import get_ollama_client
+from app.api.deps import get_groq_client, get_ollama_client
 from app.core.exceptions import (
     AIProviderUnavailableException,
     AIStructuredGenerationException,
@@ -30,16 +30,16 @@ def client() -> TestClient:
 
 
 @pytest.fixture
-def mock_ollama_healthy():
-    """Mock Ollama client simulating a healthy service with llama3.1 loaded."""
+def mock_groq_healthy():
+    """Mock Groq client simulating a healthy service with llama-3.3-70b-versatile available."""
     class MockClient:
         async def check_health(self):
             return {
                 "status": "available",
-                "base_url": "http://localhost:11434",
-                "configured_model": "llama3.1",
+                "base_url": "https://api.groq.com/openai/v1",
+                "configured_model": "llama-3.3-70b-versatile",
                 "model_available": True,
-                "available_models": ["llama3.1:latest", "llama3.2:latest"],
+                "available_models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
             }
 
         async def aclose(self):
@@ -49,25 +49,37 @@ def mock_ollama_healthy():
 
 
 @pytest.fixture
-def mock_ollama_unavailable():
-    """Mock Ollama client simulating connection refusal."""
+def mock_groq_unavailable():
+    """Mock Groq client simulating connection failure or invalid credentials."""
     class MockClient:
         async def check_health(self):
             return {
                 "status": "unavailable",
-                "base_url": "http://localhost:11434",
-                "configured_model": "llama3.1",
+                "base_url": "https://api.groq.com/openai/v1",
+                "configured_model": "llama-3.3-70b-versatile",
                 "model_available": False,
-                "error": "Cannot connect to Ollama at http://localhost:11434: Connection refused",
+                "error": "Cannot connect to Groq API at https://api.groq.com/openai/v1: Connection refused",
             }
 
         async def generate_structured(self, *args, **kwargs):
-            raise AIProviderUnavailableException("Ollama service unreachable on port 11434.")
+            raise AIProviderUnavailableException("Groq service unreachable.")
 
         async def aclose(self):
             pass
 
     return MockClient()
+
+
+@pytest.fixture
+def mock_ollama_healthy(mock_groq_healthy):
+    """Backwards-compatible mock client fixture."""
+    return mock_groq_healthy
+
+
+@pytest.fixture
+def mock_ollama_unavailable(mock_groq_unavailable):
+    """Backwards-compatible mock client fixture."""
+    return mock_groq_unavailable
 
 
 @pytest.fixture

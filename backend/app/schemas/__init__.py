@@ -1,4 +1,4 @@
-from app.schemas.health import HealthResponse, DatabaseHealth, OllamaHealth
+from app.schemas.health import HealthResponse, DatabaseHealth, OllamaHealth, AIHealth, GroqHealth
 from app.schemas.error import ErrorResponse
 from app.schemas.session import SessionCreateRequest, SessionResponse
 from app.schemas.resume import (

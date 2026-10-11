@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import InvalidSessionStateException
 from app.core.logging import logger
-from app.core.ollama_client import AsyncOllamaClient
+from app.core.groq_client import AsyncGroqClient
 from app.models.answer import Answer
 from app.models.question import Question
 from app.models.session import InterviewSession
@@ -56,10 +56,16 @@ SENIORITY_DIFFICULTY_MAP: Dict[str, str] = {
 
 
 class AdaptiveEngine:
-    """Deterministic selection state machine coupled with real Ollama question generation."""
+    """Deterministic selection state machine coupled with real Groq AI question generation."""
 
-    def __init__(self, ollama_client: AsyncOllamaClient):
-        self.ollama = ollama_client
+    def __init__(
+        self,
+        ai_client: Optional[AsyncGroqClient] = None,
+        ollama_client: Optional[AsyncGroqClient] = None,
+    ):
+        client = ai_client or ollama_client
+        self.ai_client = client
+        self.ollama = client
 
     def _get_role_competencies(self, role: str) -> List[str]:
         """Resolves core competencies based on candidate target role."""
@@ -291,16 +297,17 @@ class AdaptiveEngine:
         )
 
         logger.info(
-            f"Invoking Ollama for question #{sequence_number} | Session {session.id} | "
+            f"Invoking Groq AI for question #{sequence_number} | Session {session.id} | "
             f"Competency='{competency}' | Difficulty={difficulty}"
         )
 
-        # 7. Real Ollama structured inference (fast, bounded to 250 tokens)
-        llm_output: GeneratedQuestionLLM = await self.ollama.generate_structured(
+        # 7. Real Groq structured inference
+        client = self.ai_client or self.ollama
+        llm_output: GeneratedQuestionLLM = await client.generate_structured(
             prompt=prompt,
             schema=GeneratedQuestionLLM,
             system_prompt=system_prompt,
-            options={"temperature": 0.2, "num_predict": 250},
+            options={"temperature": 0.2, "max_tokens": 350},
         )
 
         # 8. Persist new Question record

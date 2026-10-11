@@ -10,7 +10,7 @@ class DatabaseHealth(BaseModel):
     error: Optional[str] = None
 
 
-class OllamaHealth(BaseModel):
+class AIHealth(BaseModel):
     status: Literal["available", "unavailable"]
     base_url: str
     configured_model: str
@@ -19,12 +19,23 @@ class OllamaHealth(BaseModel):
     error: Optional[str] = None
 
 
+# Backward and forward compatible aliases
+OllamaHealth = AIHealth
+GroqHealth = AIHealth
+
+
 class HealthResponse(BaseModel):
     status: Literal["healthy", "degraded", "unhealthy"] = Field(
-        description="Overall system status. 'healthy' if DB and Ollama are fully functional, 'degraded' if Ollama is unavailable, 'unhealthy' if DB is down."
+        description="Overall system status. 'healthy' if DB and AI provider (Groq) are fully functional, 'degraded' if AI is unavailable, 'unhealthy' if DB is down."
     )
     app: str = "Adaptive Interview Intelligence API"
     environment: str
     timestamp: datetime
     database: DatabaseHealth
-    ollama: OllamaHealth
+    ollama: AIHealth = Field(
+        description="AI provider health probe (retained for backward compatibility with existing clients and contracts)."
+    )
+    groq: Optional[AIHealth] = Field(
+        default=None,
+        description="Groq AI provider health probe."
+    )

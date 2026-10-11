@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from app.core.logging import logger
-from app.core.ollama_client import AsyncOllamaClient
+from app.core.groq_client import AsyncGroqClient
 from app.models.session import InterviewSession
 from app.schemas.report import (
     AnswerDetail,
@@ -34,12 +34,15 @@ class ReportService:
 
     def __init__(
         self,
-        ollama_client: Optional[AsyncOllamaClient] = None,
+        ai_client: Optional[AsyncGroqClient] = None,
+        ollama_client: Optional[AsyncGroqClient] = None,
         skill_gap_service: Optional[SkillGapService] = None,
         integrity_service: Optional[IntegrityService] = None,
     ):
-        self.ollama = ollama_client
-        self.skill_gap_service = skill_gap_service or SkillGapService(ollama_client=ollama_client)
+        client = ai_client or ollama_client
+        self.ai_client = client
+        self.ollama = client
+        self.skill_gap_service = skill_gap_service or SkillGapService(ai_client=client)
         self.integrity_service = integrity_service or IntegrityService()
 
     @staticmethod
@@ -261,8 +264,9 @@ class ReportService:
             f"Integrity telemetry indicates {integrity.risk_level} focus disruption ({integrity.total_events} total events)."
         )
 
-        # Optional Ollama enrichment
-        if self.ollama:
+        # Optional Groq AI enrichment
+        client = self.ai_client or self.ollama
+        if client:
             try:
                 system_prompt = (
                     "You are a principal technical hiring manager writing a concise candidate assessment.\n"
@@ -277,15 +281,15 @@ class ReportService:
                     f"INTEGRITY STATUS: {integrity.risk_level} risk\n\n"
                     "Synthesize an evidence-based assessment and decision recommendation."
                 )
-                llm_output: ExecutiveAssessmentLLM = await self.ollama.generate_structured(
+                llm_output: ExecutiveAssessmentLLM = await client.generate_structured(
                     prompt=prompt,
                     schema=ExecutiveAssessmentLLM,
                     system_prompt=system_prompt,
-                    options={"temperature": 0.1, "num_predict": 250},
+                    options={"temperature": 0.1, "max_tokens": 300},
                 )
                 if llm_output.overall_assessment.strip():
                     return llm_output.overall_assessment.strip(), llm_output.decision_recommendation.strip() or rec
             except Exception as e:
-                logger.info(f"Ollama report enrichment bypassed, using deterministic synthesis: {e}")
+                logger.info(f"Groq report enrichment bypassed, using deterministic synthesis: {e}")
 
         return deterministic_summary, rec

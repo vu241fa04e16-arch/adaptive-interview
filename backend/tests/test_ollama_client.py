@@ -19,15 +19,23 @@ class SampleEvaluationOutput(BaseModel):
 
 @pytest.mark.asyncio
 async def test_structured_generation_success():
-    """Verifies that valid JSON returned by Ollama is parsed into the Pydantic schema."""
-    client = AsyncOllamaClient(base_url="http://localhost:11434", model="llama3.1")
+    """Verifies that valid JSON returned by client is parsed into the Pydantic schema."""
+    client = AsyncOllamaClient(
+        api_key="gsk_test_key",
+        base_url="https://api.groq.com/openai/v1",
+        model="llama-3.3-70b-versatile",
+    )
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {
-        "message": {
-            "content": '{"score": 8.5, "verdict": "strong", "strengths": ["Clear explanation", "Accurate syntax"]}'
-        }
+        "choices": [
+            {
+                "message": {
+                    "content": '{"score": 8.5, "verdict": "strong", "strengths": ["Clear explanation", "Accurate syntax"]}'
+                }
+            }
+        ]
     }
 
     mock_http_client = AsyncMock()
@@ -48,14 +56,22 @@ async def test_structured_generation_success():
 @pytest.mark.asyncio
 async def test_structured_generation_malformed_json_raises():
     """Verifies that non-JSON text output raises AIStructuredGenerationException."""
-    client = AsyncOllamaClient(base_url="http://localhost:11434", model="llama3.1")
+    client = AsyncOllamaClient(
+        api_key="gsk_test_key",
+        base_url="https://api.groq.com/openai/v1",
+        model="llama-3.3-70b-versatile",
+    )
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {
-        "message": {
-            "content": "I am unable to answer this question in JSON format. Here is some text."
-        }
+        "choices": [
+            {
+                "message": {
+                    "content": "I am unable to answer this question in JSON format. Here is some text."
+                }
+            }
+        ]
     }
 
     mock_http_client = AsyncMock()
@@ -73,15 +89,22 @@ async def test_structured_generation_malformed_json_raises():
 @pytest.mark.asyncio
 async def test_structured_generation_schema_mismatch_raises():
     """Verifies that JSON missing required fields or invalid types raises AIStructuredGenerationException."""
-    client = AsyncOllamaClient(base_url="http://localhost:11434", model="llama3.1")
+    client = AsyncOllamaClient(
+        api_key="gsk_test_key",
+        base_url="https://api.groq.com/openai/v1",
+        model="llama-3.3-70b-versatile",
+    )
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    # Missing required 'score' field
     mock_resp.json.return_value = {
-        "message": {
-            "content": '{"verdict": "pass", "strengths": ["Good"]}'
-        }
+        "choices": [
+            {
+                "message": {
+                    "content": '{"verdict": "pass", "strengths": ["Good"]}'
+                }
+            }
+        ]
     }
 
     mock_http_client = AsyncMock()
@@ -99,7 +122,11 @@ async def test_structured_generation_schema_mismatch_raises():
 @pytest.mark.asyncio
 async def test_connection_error_raises_ai_provider_unavailable():
     """Verifies that network connection failure raises AIProviderUnavailableException."""
-    client = AsyncOllamaClient(base_url="http://localhost:11434", model="llama3.1")
+    client = AsyncOllamaClient(
+        api_key="gsk_test_key",
+        base_url="https://api.groq.com/openai/v1",
+        model="llama-3.3-70b-versatile",
+    )
 
     mock_http_client = AsyncMock()
     mock_http_client.post.side_effect = httpx.ConnectError("Connection refused")
@@ -111,13 +138,17 @@ async def test_connection_error_raises_ai_provider_unavailable():
                 schema=SampleEvaluationOutput,
             )
         assert exc_info.value.status_code == 503
-        assert "Failed to connect to local Ollama service" in exc_info.value.message
+        assert "Failed to connect to Groq API" in exc_info.value.message
 
 
 @pytest.mark.asyncio
 async def test_timeout_raises_ai_provider_unavailable():
     """Verifies that an inference timeout raises AIProviderUnavailableException."""
-    client = AsyncOllamaClient(base_url="http://localhost:11434", model="llama3.1")
+    client = AsyncOllamaClient(
+        api_key="gsk_test_key",
+        base_url="https://api.groq.com/openai/v1",
+        model="llama-3.3-70b-versatile",
+    )
 
     mock_http_client = AsyncMock()
     mock_http_client.post.side_effect = httpx.TimeoutException("Read timed out")
@@ -134,10 +165,14 @@ async def test_timeout_raises_ai_provider_unavailable():
 
 @pytest.mark.asyncio
 async def test_missing_model_raises_model_not_available():
-    """Verifies that HTTP 404 from Ollama raises ModelNotAvailableException."""
-    client = AsyncOllamaClient(base_url="http://localhost:11434", model="non_existent_model")
+    """Verifies that HTTP 404 from client raises ModelNotAvailableException."""
+    client = AsyncOllamaClient(
+        api_key="gsk_test_key",
+        base_url="https://api.groq.com/openai/v1",
+        model="non_existent_model",
+    )
 
-    mock_request = httpx.Request("POST", "http://localhost:11434/api/chat")
+    mock_request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
     mock_response = httpx.Response(404, request=mock_request, text='{"error":"model not found"}')
 
     mock_http_client = AsyncMock()

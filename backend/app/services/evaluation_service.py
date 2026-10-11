@@ -12,7 +12,7 @@ from app.core.exceptions import (
     ResourceNotFoundException,
 )
 from app.core.logging import logger
-from app.core.ollama_client import AsyncOllamaClient, get_ollama_client
+from app.core.groq_client import AsyncGroqClient, get_groq_client
 from app.models.answer import Answer
 from app.models.question import Question
 from app.models.session import InterviewSession
@@ -20,12 +20,18 @@ from app.schemas.answer import AnswerEvaluationLLM, AnswerResponse, AnswerSubmit
 
 
 class EvaluationService:
-    """Evaluates candidate interview answers using local Ollama structured inference."""
+    """Evaluates candidate interview answers using Groq structured inference."""
 
     SKILL_VERIFICATION_THRESHOLD: float = 7.0
 
-    def __init__(self, ollama_client: Optional[AsyncOllamaClient] = None):
-        self.ollama = ollama_client if ollama_client is not None else get_ollama_client()
+    def __init__(
+        self,
+        ai_client: Optional[AsyncGroqClient] = None,
+        ollama_client: Optional[AsyncGroqClient] = None,
+    ):
+        client = ai_client or ollama_client or get_groq_client()
+        self.ai_client = client
+        self.ollama = client
 
     @staticmethod
     def _get_skill_terms(skill_name: str) -> List[str]:
@@ -212,16 +218,17 @@ class EvaluationService:
         )
 
         logger.info(
-            f"Invoking Ollama answer evaluation for session {session.id} | "
+            f"Invoking Groq answer evaluation for session {session.id} | "
             f"Question {question.id} | Competency: '{question.competency}'"
         )
 
-        # 4. Invoke Ollama structured inference
-        evaluation: AnswerEvaluationLLM = await self.ollama.generate_structured(
+        # 4. Invoke Groq structured inference
+        client = self.ai_client or self.ollama
+        evaluation: AnswerEvaluationLLM = await client.generate_structured(
             prompt=prompt,
             schema=AnswerEvaluationLLM,
             system_prompt=system_prompt,
-            options={"temperature": 0.1, "num_predict": 768},
+            options={"temperature": 0.1, "max_tokens": 768},
         )
 
         # 5. Persist Answer

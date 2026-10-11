@@ -3,7 +3,7 @@ import io
 import os
 import re
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 from fastapi import UploadFile
 import pypdf
 import docx
@@ -14,7 +14,7 @@ from app.core.exceptions import (
     InvalidFileException,
 )
 from app.core.logging import logger
-from app.core.ollama_client import AsyncOllamaClient
+from app.core.groq_client import AsyncGroqClient
 from app.schemas.resume import ResumeAnalysisLLMOutput
 
 settings = get_settings()
@@ -23,8 +23,14 @@ settings = get_settings()
 class ResumeService:
     """Service for validating, parsing, and extracting technical competencies from candidate resumes."""
 
-    def __init__(self, ollama_client: AsyncOllamaClient):
-        self.ollama = ollama_client
+    def __init__(
+        self,
+        ai_client: Optional[AsyncGroqClient] = None,
+        ollama_client: Optional[AsyncGroqClient] = None,
+    ):
+        client = ai_client or ollama_client
+        self.ai_client = client
+        self.ollama = client
 
     async def validate_and_read_upload(self, file: UploadFile) -> Tuple[bytes, str, str]:
         """Validates file extension, size, and computes SHA-256 hash.
@@ -135,17 +141,17 @@ class ResumeService:
         destination.write_bytes(content)
         return str(destination)
 
-    async def analyze_resume_with_ollama(
+    async def analyze_resume_with_groq(
         self,
         resume_text: str,
         target_role: str,
         target_level: str,
     ) -> ResumeAnalysisLLMOutput:
-        """Invokes real Ollama local service to extract claimed skills, projects, and suggested focus areas."""
-        # Sanitize whitespace and constrain input text to protect CPU inference from stalling
+        """Invokes real Groq API to extract claimed skills, projects, and suggested focus areas."""
+        # Sanitize whitespace and constrain input text to protect inference bounds
         cleaned_text = re.sub(r"\n{3,}", "\n\n", resume_text).strip()
-        if len(cleaned_text) > 3500:
-            cleaned_text = cleaned_text[:3500] + "\n... [truncated for analysis]"
+        if len(cleaned_text) > 4000:
+            cleaned_text = cleaned_text[:4000] + "\n... [truncated for analysis]"
 
         system_prompt = (
             "You are an expert technical interviewer and talent architect.\n"
@@ -171,11 +177,16 @@ class ResumeService:
             "1 to 2 notable projects, and 3 to 5 targeted interview focus areas."
         )
 
-        analysis: ResumeAnalysisLLMOutput = await self.ollama.generate_structured(
+        client = self.ai_client or self.ollama
+        analysis: ResumeAnalysisLLMOutput = await client.generate_structured(
             prompt=prompt,
             schema=ResumeAnalysisLLMOutput,
             system_prompt=system_prompt,
-            options={"temperature": 0.1, "num_predict": 768},
+            options={"temperature": 0.1, "max_tokens": 768},
         )
 
         return analysis
+
+    # Backwards compatibility aliases
+    analyze_resume_with_ollama = analyze_resume_with_groq
+    analyze_resume = analyze_resume_with_groq

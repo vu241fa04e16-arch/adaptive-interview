@@ -42,7 +42,7 @@ class TranscriptionService:
     def __init__(self, config: Optional[Settings] = None):
         self.settings = config or get_settings()
         self._model = None
-        self._model_lock = asyncio.Lock()
+        self._model_lock = None
 
     def _get_model(self):
         """Lazily load faster-whisper model on first actual transcription request."""

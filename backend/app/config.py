@@ -31,7 +31,13 @@ class Settings(BaseSettings):
     # Database Configuration (PostgreSQL 18)
     DATABASE_URL: str = "postgresql+asyncpg://postgres:root@localhost:5432/adaptive_interview"
 
-    # Ollama Local Service Configuration
+    # Groq Cloud API Configuration
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    GROQ_TIMEOUT_SECONDS: float = 60.0
+
+    # Ollama Local Service Configuration (Deprecated / Retained for Compatibility)
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.2:1b"
     OLLAMA_TIMEOUT_SECONDS: float = 180.0
