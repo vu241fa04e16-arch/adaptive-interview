@@ -186,6 +186,31 @@ class AsyncOllamaClient:
                 details={"status_code": e.response.status_code, "body": e.response.text},
             ) from e
 
+    @staticmethod
+    def _salvage_truncated_json(text: str) -> Optional[Any]:
+        """Attempts to repair slightly truncated JSON produced by LLM token cutoffs."""
+        t = text.strip()
+        if not (t.startswith("{") or t.startswith("[")):
+            return None
+
+        # Try closing brackets at last delimiter or unclosed string
+        for try_close_str in (False, True):
+            for i in range(len(t) - 1, 0, -1):
+                if not try_close_str and t[i] not in ("}", "]"):
+                    continue
+                candidate = t[: i + 1]
+                if try_close_str:
+                    candidate = candidate + '"'
+                open_braces = candidate.count("{") - candidate.count("}")
+                open_brackets = candidate.count("[") - candidate.count("]")
+                if open_braces >= 0 and open_brackets >= 0:
+                    candidate_balanced = candidate + ("]" * open_brackets) + ("}" * open_braces)
+                    try:
+                        return json.loads(candidate_balanced)
+                    except json.JSONDecodeError:
+                        continue
+        return None
+
     async def generate_structured(
         self,
         prompt: str,
@@ -202,7 +227,9 @@ class AsyncOllamaClient:
         base_system = (
             "You are a specialized AI system that ONLY outputs valid JSON adhering strictly "
             "to the following JSON Schema. Do NOT include markdown blocks, introductory words, "
-            f"or postscript commentary.\n\nJSON SCHEMA:\n{schema_json}"
+            f"or postscript commentary.\n\nJSON SCHEMA:\n{schema_json}\n\n"
+            "IMPORTANT: Output the concrete values directly at the root level of a single JSON object. "
+            "Do NOT output the schema definitions or wrap your response inside a 'properties' object."
         )
         if system_prompt:
             base_system = f"{system_prompt}\n\n{base_system}"
@@ -219,24 +246,41 @@ class AsyncOllamaClient:
         )
 
         # Parse JSON
-        try:
-            # Strip accidental markdown code blocks if present
-            cleaned = raw_response.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned[7:]
-            if cleaned.startswith("```"):
-                cleaned = cleaned[3:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-            cleaned = cleaned.strip()
+        cleaned = raw_response.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
 
+        try:
             parsed_data = json.loads(cleaned)
         except json.JSONDecodeError as e:
-            logger.error(f"Ollama generated non-JSON content: {raw_response}")
-            raise AIStructuredGenerationException(
-                message="Ollama produced malformed JSON that could not be parsed.",
-                details={"raw_output": raw_response, "json_error": str(e)},
-            ) from e
+            # Attempt light recovery for truncated JSON (e.g. LLM token cutoff)
+            parsed_data = self._salvage_truncated_json(cleaned)
+            if parsed_data is None:
+                logger.error(f"Ollama generated non-JSON content: {raw_response}")
+                raise AIStructuredGenerationException(
+                    message="Ollama produced malformed JSON that could not be parsed.",
+                    details={"raw_output": raw_response, "json_error": str(e)},
+                ) from e
+            logger.info("Successfully recovered truncated structured JSON from Ollama.")
+
+        # Check if model wrapped output in properties or wrapper key
+        if isinstance(parsed_data, dict):
+            schema_fields = set(schema.model_fields.keys())
+            if "properties" in parsed_data and isinstance(parsed_data["properties"], dict):
+                prop_keys = set(parsed_data["properties"].keys())
+                if prop_keys.intersection(schema_fields):
+                    logger.info("Unwrapping 'properties' dictionary from Ollama output.")
+                    parsed_data = parsed_data["properties"]
+            elif len(parsed_data) == 1:
+                first_key = next(iter(parsed_data))
+                if first_key in ("evaluation", "data", "result", "response") and isinstance(parsed_data[first_key], dict):
+                    logger.info(f"Unwrapping '{first_key}' dictionary from Ollama output.")
+                    parsed_data = parsed_data[first_key]
 
         # Validate with Pydantic
         try:

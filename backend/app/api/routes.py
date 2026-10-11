@@ -17,8 +17,13 @@ from app.api.deps import (
     get_skill_gap_service,
     get_transcription_service,
 )
+from sqlalchemy.exc import SQLAlchemyError
 from app.config import get_settings
-from app.core.exceptions import InvalidSessionStateException, ResourceNotFoundException
+from app.core.exceptions import (
+    DatabaseConnectionException,
+    InvalidSessionStateException,
+    ResourceNotFoundException,
+)
 from app.core.logging import logger
 from app.database import check_database_health
 from app.models.answer import Answer
@@ -462,37 +467,46 @@ async def submit_answer(
             details={"question_id": payload.question_id},
         )
 
-    # 3. Retrieve session
-    result = await db.execute(
-        select(InterviewSession).where(InterviewSession.id == session_uuid)
-    )
-    session = result.scalar_one_or_none()
-    if session is None:
-        raise ResourceNotFoundException(
-            resource="InterviewSession",
-            resource_id=sessionId,
+    # 3. Retrieve session and question
+    try:
+        result = await db.execute(
+            select(InterviewSession).where(InterviewSession.id == session_uuid)
         )
+        session = result.scalar_one_or_none()
+        if session is None:
+            raise ResourceNotFoundException(
+                resource="InterviewSession",
+                resource_id=sessionId,
+            )
 
-    # 4. Validate session state
-    if session.status in ["completed", "abandoned"]:
-        raise InvalidSessionStateException(
-            message=f"Cannot submit answer: session is already '{session.status}'.",
-            details={"sessionId": sessionId, "status": session.status},
-        )
+        # 4. Validate session state
+        if session.status in ["completed", "abandoned"]:
+            raise InvalidSessionStateException(
+                message=f"Cannot submit answer: session is already '{session.status}'.",
+                details={"sessionId": sessionId, "status": session.status},
+            )
 
-    # 5. Retrieve question belonging to this session
-    q_result = await db.execute(
-        select(Question).where(
-            Question.id == question_uuid,
-            Question.session_id == session_uuid,
+        # 5. Retrieve question belonging to this session
+        q_result = await db.execute(
+            select(Question).where(
+                Question.id == question_uuid,
+                Question.session_id == session_uuid,
+            )
         )
-    )
-    question = q_result.scalar_one_or_none()
-    if question is None:
-        raise ResourceNotFoundException(
-            resource="Question",
-            resource_id=payload.question_id,
-        )
+        question = q_result.scalar_one_or_none()
+        if question is None:
+            raise ResourceNotFoundException(
+                resource="Question",
+                resource_id=payload.question_id,
+            )
+    except (ResourceNotFoundException, InvalidSessionStateException):
+        raise
+    except SQLAlchemyError as e:
+        logger.error(f"Database error during answer submission query for session {sessionId}: {e}")
+        raise DatabaseConnectionException(
+            message="Database query failed during answer submission.",
+            details={"sessionId": sessionId},
+        ) from e
 
     # 6. Evaluate and persist answer
     return await evaluation_service.evaluate_and_save_answer(

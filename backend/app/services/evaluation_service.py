@@ -3,11 +3,16 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import uuid
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import InvalidSessionStateException, ResourceNotFoundException
+from app.core.exceptions import (
+    DatabaseConnectionException,
+    InvalidSessionStateException,
+    ResourceNotFoundException,
+)
 from app.core.logging import logger
-from app.core.ollama_client import AsyncOllamaClient
+from app.core.ollama_client import AsyncOllamaClient, get_ollama_client
 from app.models.answer import Answer
 from app.models.question import Question
 from app.models.session import InterviewSession
@@ -19,8 +24,8 @@ class EvaluationService:
 
     SKILL_VERIFICATION_THRESHOLD: float = 7.0
 
-    def __init__(self, ollama_client: AsyncOllamaClient):
-        self.ollama = ollama_client
+    def __init__(self, ollama_client: Optional[AsyncOllamaClient] = None):
+        self.ollama = ollama_client if ollama_client is not None else get_ollama_client()
 
     @staticmethod
     def _get_skill_terms(skill_name: str) -> List[str]:
@@ -154,6 +159,8 @@ class EvaluationService:
         result = await db.execute(stmt)
         existing_answer = result.scalar_one_or_none()
 
+        has_more_questions = question.sequence_number < 4
+
         if existing_answer is not None:
             logger.info(
                 f"Duplicate answer submission detected for question {question.id} in session {session.id}. "
@@ -169,7 +176,8 @@ class EvaluationService:
                 feedback=existing_answer.feedback,
                 improvement_suggestions=existing_answer.improvement_suggestions,
                 competency=question.competency,
-                created_at=existing_answer.created_at,
+                created_at=existing_answer.created_at or datetime.now(timezone.utc),
+                has_more=has_more_questions,
             )
 
         # 3. Build Ollama prompt with rubric constraints
@@ -180,15 +188,16 @@ class EvaluationService:
             "You are an expert technical interviewer evaluating an engineering candidate's answer.\n"
             "Evaluate the candidate's answer rigorously, objectively, and constructively against the target role, seniority level, and question evaluation criteria.\n\n"
             "CRITICAL CONSTRAINTS:\n"
-            "1. Output MUST strictly conform to the provided JSON Schema.\n"
-            "2. Score on a scale from 0.0 to 10.0:\n"
+            "1. Output a single JSON object with concrete root-level keys: 'score', 'strengths', 'weaknesses', 'feedback', 'improvement_suggestions'.\n"
+            "2. Do NOT output schema definitions, meta-properties, or wrap your response inside a 'properties' object.\n"
+            "3. Score on a scale from 0.0 to 10.0:\n"
             "   - 0.0 to 4.9: Inadequate or incorrect understanding\n"
             "   - 5.0 to 6.9: Basic knowledge with notable omissions or inaccuracies\n"
             "   - 7.0 to 8.4: Solid competency fulfilling expectations for seniority level\n"
             "   - 8.5 to 10.0: Expert mastery demonstrating deep architectural and practical grasp\n"
-            "3. Identify concrete demonstrated strengths.\n"
-            "4. Identify specific technical weaknesses or omissions.\n"
-            "5. Provide constructive feedback and concrete recommendations for improvement."
+            "4. Identify concrete demonstrated strengths.\n"
+            "5. Identify specific technical weaknesses or omissions.\n"
+            "6. Provide constructive feedback and concrete recommendations for improvement."
         )
 
         prompt = (
@@ -212,7 +221,7 @@ class EvaluationService:
             prompt=prompt,
             schema=AnswerEvaluationLLM,
             system_prompt=system_prompt,
-            options={"temperature": 0.1, "num_predict": 400},
+            options={"temperature": 0.1, "num_predict": 768},
         )
 
         # 5. Persist Answer
@@ -285,16 +294,45 @@ class EvaluationService:
         comp_state["claimed_skills"] = claimed_skills
         session.competency_state = comp_state
 
-        await db.commit()
-        await db.refresh(new_answer)
+        try:
+            await db.commit()
+            await db.refresh(new_answer)
+        except IntegrityError:
+            logger.warning(
+                f"IntegrityError on committing answer for question {question.id} in session {session.id}. "
+                "Concurrent submission detected. Rolling back and fetching existing answer."
+            )
+            await db.rollback()
+            stmt = select(Answer).where(Answer.question_id == question.id)
+            res = await db.execute(stmt)
+            existing_ans = res.scalar_one_or_none()
+            if existing_ans is not None:
+                return AnswerResponse(
+                    sessionId=str(session.id),
+                    answer_id=str(existing_ans.id),
+                    question_id=str(question.id),
+                    score=existing_ans.score,
+                    strengths=existing_ans.strengths,
+                    weaknesses=existing_ans.weaknesses,
+                    feedback=existing_ans.feedback,
+                    improvement_suggestions=existing_ans.improvement_suggestions,
+                    competency=question.competency,
+                    created_at=existing_ans.created_at or datetime.now(timezone.utc),
+                    has_more=has_more_questions,
+                )
+            raise
+        except SQLAlchemyError as e:
+            logger.error(f"Database error while saving answer for session {session.id}: {e}")
+            await db.rollback()
+            raise DatabaseConnectionException(
+                message="A database error occurred while saving the evaluation.",
+                details={"sessionId": str(session.id), "question_id": str(question.id)},
+            ) from e
 
         logger.info(
             f"Answer persisted (ID: {new_answer.id}) with score {new_answer.score}/10. "
             f"Competency '{question.competency}' updated."
         )
-
-        # Check if more questions remain (standard adaptive session length: 4 questions)
-        has_more_questions = question.sequence_number < 4
 
         return AnswerResponse(
             sessionId=str(session.id),
@@ -306,6 +344,6 @@ class EvaluationService:
             feedback=new_answer.feedback,
             improvement_suggestions=new_answer.improvement_suggestions,
             competency=question.competency,
-            created_at=new_answer.created_at,
+            created_at=new_answer.created_at or datetime.now(timezone.utc),
             has_more=has_more_questions,
         )

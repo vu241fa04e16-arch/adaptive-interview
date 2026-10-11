@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -90,7 +91,7 @@ def create_application() -> FastAPI:
             content={
                 "error": "VALIDATION_ERROR",
                 "message": "Request body or query parameter validation failed.",
-                "details": {"errors": exc.errors()},
+                "details": {"errors": jsonable_encoder(exc.errors())},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         )

@@ -106,3 +106,44 @@ async def test_live_ollama_resume_analysis():
 
     finally:
         await client.aclose()
+
+
+@pytest.mark.live_ollama
+def test_live_ollama_full_resume_upload_endpoint(client, sample_docx_bytes: bytes):
+    """Live end-to-end route test: POST /sessions then POST /sessions/{id}/resume with real Ollama inference."""
+    import io
+
+    # 1. Create a real session
+    create_payload = {
+        "candidate_name": "Sarah Connor",
+        "candidate_email": "sarah.connor@cyberdyne.io",
+        "target_role": "Senior Distributed Systems Architect",
+        "target_level": "Senior",
+        "time_limit_minutes": 45,
+    }
+    session_res = client.post("/api/sessions", json=create_payload)
+    assert session_res.status_code == 201
+    session_id = session_res.json()["sessionId"]
+
+    # 2. Upload DOCX resume to trigger real Ollama llama3.2:1b extraction
+    files = {
+        "file": (
+            "sarah_connor_resume.docx",
+            io.BytesIO(sample_docx_bytes),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    }
+    upload_res = client.post(f"/api/sessions/{session_id}/resume", files=files)
+    assert upload_res.status_code == 200, f"Upload failed: {upload_res.text}"
+    data = upload_res.json()
+
+    # 3. Assert real extracted data
+    assert data["sessionId"] == session_id
+    assert data["resume_parsed"] is True
+    assert len(data["claimed_skills"]) >= 1
+    assert len(data["skills"]) >= 1
+    assert data["experienceYears"] >= 1.0
+    assert len(data["suggested_focus_areas"]) >= 1
+    print(f"\n[LIVE FULL ENDPOINT SUCCESS] Analyzed real resume for session {session_id}")
+    print(f"Skills: {data['skills']}")
+    print(f"Calculated Experience: {data['experienceYears']} years")

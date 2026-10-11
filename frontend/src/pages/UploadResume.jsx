@@ -102,6 +102,7 @@ export default function UploadResume() {
       setParsingProgress('done');
     } catch (err) {
       console.error('Session creation / resume parsing error:', err);
+      setParsingProgress(null);
       setError(err.message || 'Failed to process resume. Please try again.');
     } finally {
       setIsSubmitting(false);

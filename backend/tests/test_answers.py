@@ -502,3 +502,186 @@ def test_no_partial_substring_matching_alone():
     assert not EvaluationService._matches_skill_name("Java", "Client-side JavaScript React application.")
     assert not EvaluationService._matches_skill_name("Kafka", "Kafkaesque bureaucracy in software teams.")
 
+
+def test_submit_answer_blank_text_returns_422(
+    client: TestClient,
+    active_session_and_question,
+):
+    """Verifies that submitting blank whitespace or empty text returns HTTP 422."""
+    session_id, question_id = active_session_and_question
+    resp = client.post(
+        f"/api/sessions/{session_id}/answers",
+        json={"question_id": question_id, "answer_text": "    "},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"] == "VALIDATION_ERROR"
+
+
+def test_submit_answer_ai_wrapped_properties_recovery(
+    client: TestClient,
+    active_session_and_question,
+):
+    """Verifies that Ollama output wrapped in 'properties' or schema definitions is successfully normalized and parsed."""
+    session_id, question_id = active_session_and_question
+
+    class MockWrappedPropertiesClient:
+        async def check_health(self):
+            return {"status": "available", "base_url": "http://localhost:11434", "configured_model": "llama3.2:1b", "model_available": True}
+
+        async def generate_structured(self, prompt, schema, system_prompt=None, options=None):
+            # Simulate Ollama echoing schema with 'properties' and nested 'items'
+            return schema.model_validate({
+                "properties": {
+                    "score": "8.8 / 10",
+                    "strengths": {"items": ["Thorough explanation of Kubernetes StatefulSets", "Clear routing via Envoy"]},
+                    "weaknesses": "Lacks mention of etcd quorum mechanics",
+                    "feedback": ["Solid architecture and deep grasp of distributed scheduling.", "Practical operational focus."],
+                    "improvement_suggestions": [{"text": "Review etcd leader election protocols"}]
+                }
+            })
+
+        async def aclose(self):
+            pass
+
+    app.dependency_overrides[get_ollama_client] = lambda: MockWrappedPropertiesClient()
+
+    resp = client.post(
+        f"/api/sessions/{session_id}/answers",
+        json={"question_id": question_id, "answer_text": "We deploy StatefulSets with Envoy ingress routing."},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["score"] == 8.8
+    assert len(data["strengths"]) == 2
+    assert "etcd" in data["weaknesses"][0]
+    assert "Solid architecture" in data["feedback"]
+    assert len(data["improvement_suggestions"]) == 1
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_submit_answer_database_failure_returns_503():
+    """Verifies that a database error during commit triggers rollback and raises DatabaseConnectionException (HTTP 503)."""
+    from sqlalchemy.exc import OperationalError
+    from app.core.exceptions import DatabaseConnectionException
+
+    session = make_sample_session()
+    question = make_sample_question(session.id)
+    answer_payload = AnswerSubmitRequest(
+        question_id=str(question.id),
+        answer_text="PostgreSQL uses MVCC with snapshot isolation.",
+    )
+
+    mock_ollama = AsyncMock()
+    mock_ollama.generate_structured.return_value = AnswerEvaluationLLM(
+        score=8.0,
+        strengths=["Good MVCC understanding"],
+        weaknesses=[],
+        feedback="Clear answer.",
+        improvement_suggestions=[],
+    )
+
+    db = make_mock_db()
+    # Simulate DB operational failure on commit
+    db.commit.side_effect = OperationalError("connection lost", {}, Exception("DB disconnect"))
+
+    service = EvaluationService(ollama_client=mock_ollama)
+
+    with pytest.raises(DatabaseConnectionException) as exc_info:
+        await service.evaluate_and_save_answer(session, question, answer_payload, db)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.error_code == "DATABASE_CONNECTION_ERROR"
+    # Ensure rollback was called
+    db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_submit_answer_concurrent_integrity_error_is_idempotent():
+    """Verifies that a race condition causing IntegrityError on commit rolls back and safely returns existing answer."""
+    from sqlalchemy.exc import IntegrityError
+    from app.models.answer import Answer
+
+    session = make_sample_session()
+    question = make_sample_question(session.id)
+    answer_payload = AnswerSubmitRequest(
+        question_id=str(question.id),
+        answer_text="PostgreSQL uses MVCC with snapshot isolation.",
+    )
+
+    existing_committed_answer = Answer(
+        id=uuid.uuid4(),
+        session_id=session.id,
+        question_id=question.id,
+        answer_text="Concurrently committed answer.",
+        score=8.5,
+        strengths=["Concurrent strength"],
+        weaknesses=[],
+        feedback="Concurrently saved evaluation.",
+        improvement_suggestions=[],
+    )
+
+    mock_ollama = AsyncMock()
+    mock_ollama.generate_structured.return_value = AnswerEvaluationLLM(
+        score=8.0,
+        strengths=["Good understanding"],
+        weaknesses=[],
+        feedback="Clear answer.",
+        improvement_suggestions=[],
+    )
+
+    # First check: returns None (no duplicate yet)
+    # Then commit: raises IntegrityError
+    # Then re-query: returns existing_committed_answer
+    mock_res_empty = MagicMock()
+    mock_res_empty.scalar_one_or_none.return_value = None
+
+    mock_res_existing = MagicMock()
+    mock_res_existing.scalar_one_or_none.return_value = existing_committed_answer
+
+    db = AsyncMock()
+    db.execute.side_effect = [mock_res_empty, mock_res_existing]
+    db.commit.side_effect = IntegrityError("duplicate key value", {}, Exception("unique constraint"))
+    db.add = MagicMock()
+
+    service = EvaluationService(ollama_client=mock_ollama)
+    resp = await service.evaluate_and_save_answer(session, question, answer_payload, db)
+
+    assert resp.answer_id == str(existing_committed_answer.id)
+    assert resp.score == 8.5
+    assert resp.feedback == "Concurrently saved evaluation."
+    db.rollback.assert_awaited_once()
+
+
+def test_answer_evaluation_schema_normalization():
+    """Verifies that AnswerEvaluationLLM safely handles string scores, 100-scales, lists of strings, and dict items."""
+    # 1. String score and string lists
+    parsed1 = AnswerEvaluationLLM.model_validate({
+        "score": "9.2/10",
+        "strengths": "Single line strength\nAnother bullet strength",
+        "weaknesses": None,
+        "feedback": "Strong performance across criteria.",
+        "improvement_suggestions": "Study Kafka",
+    })
+    assert parsed1.score == 9.2
+    assert len(parsed1.strengths) == 2
+    assert parsed1.weaknesses == []
+    assert parsed1.improvement_suggestions == ["Study Kafka"]
+
+    # 2. 0-100 percentage scale normalized down to 0-10
+    parsed2 = AnswerEvaluationLLM.model_validate({
+        "score": 85,
+        "strengths": [{"text": "Good concurrency"}],
+        "feedback": ["Part 1 feedback.", "Part 2 feedback."],
+    })
+    assert parsed2.score == 8.5
+    assert parsed2.strengths == ["Good concurrency"]
+    assert parsed2.feedback == "Part 1 feedback. Part 2 feedback."
+
+    # 3. Invalid/missing score raises ValidationError
+    with pytest.raises(Exception):
+        AnswerEvaluationLLM.model_validate({
+            "score": "N/A",
+            "feedback": "No score provided.",
+        })

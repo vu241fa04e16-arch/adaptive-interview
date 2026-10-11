@@ -9,6 +9,8 @@ from app.core.exceptions import (
     AIStructuredGenerationException,
 )
 from app.main import app
+from app.schemas.resume import ClaimedSkill
+from app.services.resume_service import ResumeService
 
 
 @pytest.fixture
@@ -213,3 +215,30 @@ def test_upload_resume_ollama_malformed_output(
     assert response.json()["error"] == "AI_STRUCTURED_GENERATION_FAILED"
 
     app.dependency_overrides.clear()
+
+
+def test_claimed_skill_normalization():
+    """Verifies that ClaimedSkill normalizes proficiency casing/synonyms and parses numeric experience."""
+    skill_lower = ClaimedSkill(name="Python", claimed_proficiency="intermediate", claimed_experience_years="5+")
+    assert skill_lower.claimed_proficiency == "Intermediate"
+    assert skill_lower.claimed_experience_years == 5.0
+
+    skill_senior = ClaimedSkill(name="Docker", claimed_proficiency="senior engineer", claimed_experience_years="7.5 years")
+    assert skill_senior.claimed_proficiency == "Advanced"
+    assert skill_senior.claimed_experience_years == 7.5
+
+    skill_expert = ClaimedSkill(name="PostgreSQL", claimed_proficiency="Principal Architect", claimed_experience_years=10)
+    assert skill_expert.claimed_proficiency == "Expert"
+    assert skill_expert.claimed_experience_years == 10.0
+
+    skill_beginner = ClaimedSkill(name="Rust", claimed_proficiency="junior/beginner", claimed_experience_years=None)
+    assert skill_beginner.claimed_proficiency == "Beginner"
+    assert skill_beginner.claimed_experience_years is None
+
+
+def test_config_env_paths_resolve():
+    """Verifies that Settings always resolves llama3.2:1b and 180s timeout regardless of working directory."""
+    from app.config import get_settings
+    settings = get_settings()
+    assert settings.OLLAMA_MODEL == "llama3.2:1b"
+    assert settings.OLLAMA_TIMEOUT_SECONDS >= 180.0

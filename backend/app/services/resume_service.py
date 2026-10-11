@@ -142,16 +142,22 @@ class ResumeService:
         target_level: str,
     ) -> ResumeAnalysisLLMOutput:
         """Invokes real Ollama local service to extract claimed skills, projects, and suggested focus areas."""
+        # Sanitize whitespace and constrain input text to protect CPU inference from stalling
+        cleaned_text = re.sub(r"\n{3,}", "\n\n", resume_text).strip()
+        if len(cleaned_text) > 3500:
+            cleaned_text = cleaned_text[:3500] + "\n... [truncated for analysis]"
+
         system_prompt = (
             "You are an expert technical interviewer and talent architect.\n"
             "Analyze the candidate's resume text and extract ONLY technical information explicitly stated in the document.\n\n"
             "CRITICAL RULES:\n"
-            "1. NEVER fabricate or assume skills, projects, or experience years. If a skill is not mentioned, omit it.\n"
-            "2. If years of experience for a skill are not explicitly stated, set claimed_experience_years to null.\n"
-            "3. Every claimed skill must have a verbatim context_snippet quote from the resume proving its presence.\n"
-            "4. Suggest 3 to 6 high-value focus areas that should be deeply verified or probed during the interview "
+            "1. Extract between 4 and 7 primary distinct technical skills explicitly mentioned (e.g. PostgreSQL, Kafka, Python). DO NOT repeat synonyms or redundant variations.\n"
+            "2. Keep each context_snippet concise (under 20 words).\n"
+            "3. If years of experience for a skill are not explicitly stated, set claimed_experience_years to null.\n"
+            "4. Extract 1 to 2 key projects mentioned.\n"
+            "5. Suggest 3 to 5 high-value focus areas that should be deeply probed during the interview "
             f"for the target role '{target_role}' at '{target_level}' seniority.\n"
-            "5. Output MUST adhere strictly to the JSON Schema provided."
+            "6. Output MUST adhere strictly to the JSON Schema provided."
         )
 
         prompt = (
@@ -159,17 +165,17 @@ class ResumeService:
             f"TARGET SENIORITY LEVEL: {target_level}\n\n"
             "CANDIDATE RESUME TEXT:\n"
             "------------------------\n"
-            f"{resume_text}\n"
+            f"{cleaned_text}\n"
             "------------------------\n\n"
-            "Extract candidate overview, all claimed technical skills with supporting snippets, "
-            "notable projects, and targeted interview focus areas."
+            "Extract candidate overview, 4 to 7 key technical skills with brief snippets, "
+            "1 to 2 notable projects, and 3 to 5 targeted interview focus areas."
         )
 
         analysis: ResumeAnalysisLLMOutput = await self.ollama.generate_structured(
             prompt=prompt,
             schema=ResumeAnalysisLLMOutput,
             system_prompt=system_prompt,
-            options={"temperature": 0.1, "num_predict": 1024},
+            options={"temperature": 0.1, "num_predict": 768},
         )
 
         return analysis

@@ -1,14 +1,22 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import List, Optional, Union
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+_ENV_PATHS = (
+    str(_BACKEND_DIR / ".env"),
+    str(_BACKEND_DIR.parent / ".env"),
+    ".env",
+)
 
 
 class Settings(BaseSettings):
     """Application configuration settings loaded from environment or .env file."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_PATHS,
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
@@ -25,8 +33,8 @@ class Settings(BaseSettings):
 
     # Ollama Local Service Configuration
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "llama3.1"
-    OLLAMA_TIMEOUT_SECONDS: float = 120.0
+    OLLAMA_MODEL: str = "llama3.2:1b"
+    OLLAMA_TIMEOUT_SECONDS: float = 180.0
 
     # Resume Upload Configuration
     MAX_RESUME_SIZE_MB: int = 10

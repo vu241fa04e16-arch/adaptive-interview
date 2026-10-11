@@ -14,7 +14,7 @@ const STORAGE_PREFIX = 'adaptive_interview_';
 
 // Default and AI-heavy timeout configurations (in milliseconds)
 export const DEFAULT_TIMEOUT_MS = 60000;  // 60 seconds for standard requests
-export const AI_TIMEOUT_MS = 120000;      // 120 seconds for Ollama LLM inference & transcription
+export const AI_TIMEOUT_MS = 180000;      // 180 seconds for Ollama LLM inference & transcription
 
 /**
  * Standardized API request helper
