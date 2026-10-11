@@ -27,5 +27,5 @@ services:
 databases:
   - name: adaptive-interview-db
     databaseName: adaptive_interview
-    user: postgres
+    user: interview_db_user
     plan: free
