@@ -217,6 +217,10 @@ class AsyncGroqClient:
             if "seed" in options:
                 payload["seed"] = options["seed"]
 
+        # Ensure a sufficient completion token ceiling for JSON generation if unspecified
+        if "max_tokens" not in payload:
+            payload["max_tokens"] = 1024
+
         try:
             client = await self._get_client()
             response = await client.post("/chat/completions", json=payload)
