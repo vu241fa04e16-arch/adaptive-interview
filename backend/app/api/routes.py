@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
+from typing import Optional
 import uuid
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -13,6 +14,8 @@ from app.api.deps import (
     get_ollama_client,
     get_report_service,
     get_resume_service,
+    get_skill_gap_service,
+    get_transcription_service,
 )
 from app.config import get_settings
 from app.core.exceptions import InvalidSessionStateException, ResourceNotFoundException
@@ -23,7 +26,7 @@ from app.models.event import SessionEvent
 from app.models.question import Question
 from app.models.resume import ResumeAnalysis
 from app.models.session import InterviewSession
-from app.schemas.answer import AnswerResponse, AnswerSubmitRequest
+from app.schemas.answer import AnswerResponse, AnswerSubmitRequest, AudioAnswerResponse
 from app.schemas.event import EventCreateRequest, EventResponse, InterviewProgress
 from app.schemas.health import DatabaseHealth, HealthResponse, OllamaHealth
 from app.schemas.question import QuestionResponse
@@ -34,10 +37,13 @@ from app.schemas.resume import (
     ResumeUploadResponse,
 )
 from app.schemas.session import SessionCreateRequest, SessionResponse
+from app.schemas.skill_gap import JobDescriptionSubmitRequest, SkillGapReport
 from app.services.adaptive_engine import AdaptiveEngine
 from app.services.evaluation_service import EvaluationService
 from app.services.report_service import ReportService
 from app.services.resume_service import ResumeService
+from app.services.skill_gap_service import SkillGapService
+from app.services.transcription_service import TranscriptionService
 
 router = APIRouter(prefix="/api", tags=["Interview Intelligence"])
 settings = get_settings()
@@ -100,7 +106,11 @@ async def create_session(
     payload: SessionCreateRequest,
     db: AsyncSession = Depends(get_db),
 ) -> SessionResponse:
-    """Creates a new interview session and initializes empty competency matrix."""
+    """Creates a new interview session and initializes empty competency matrix and optional job description."""
+    initial_comp_state: Dict[str, Any] = {}
+    if payload.job_description and payload.job_description.strip():
+        initial_comp_state["job_description"] = payload.job_description.strip()
+
     session = InterviewSession(
         candidate_name=payload.candidate_name,
         candidate_email=str(payload.candidate_email),
@@ -108,7 +118,7 @@ async def create_session(
         target_level=payload.target_level,
         status="created",
         time_limit_minutes=payload.time_limit_minutes,
-        competency_state={},
+        competency_state=initial_comp_state,
     )
 
     db.add(session)
@@ -127,6 +137,7 @@ async def create_session(
         time_limit_minutes=session.time_limit_minutes,
         created_at=session.created_at,
         resume_uploaded=False,
+        job_description_provided=bool(payload.job_description and payload.job_description.strip()),
     )
 
 
@@ -280,6 +291,91 @@ async def upload_resume(
     )
 
 
+@router.post(
+    "/sessions/{sessionId}/job-description",
+    response_model=SkillGapReport,
+    status_code=status.HTTP_200_OK,
+    summary="Ingest Job Description & Analyze Skill Gap",
+    description="Accepts technical job description, extracts required competencies, compares against candidate claims/answers, and persists gap analysis.",
+)
+async def submit_job_description(
+    sessionId: str,
+    payload: JobDescriptionSubmitRequest,
+    db: AsyncSession = Depends(get_db),
+    skill_gap_service: SkillGapService = Depends(get_skill_gap_service),
+) -> SkillGapReport:
+    """Extracts required skills from JD, evaluates against resume claims and interview evidence, persists in session."""
+    try:
+        session_uuid = uuid.UUID(sessionId)
+    except (ValueError, AttributeError):
+        raise InvalidSessionStateException(
+            message=f"Invalid sessionId format '{sessionId}'. Must be a valid UUID.",
+            details={"sessionId": sessionId},
+        )
+
+    result = await db.execute(
+        select(InterviewSession)
+        .options(
+            selectinload(InterviewSession.resume_analysis),
+            selectinload(InterviewSession.questions),
+            selectinload(InterviewSession.answers),
+        )
+        .where(InterviewSession.id == session_uuid)
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise ResourceNotFoundException(
+            resource="InterviewSession",
+            resource_id=sessionId,
+        )
+
+    return await skill_gap_service.analyze_and_persist_gap(
+        session=session,
+        job_description=payload.job_description,
+        db=db,
+    )
+
+
+@router.get(
+    "/sessions/{sessionId}/skill-gap",
+    response_model=SkillGapReport,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve Resume-JD Skill Gap Analysis",
+    description="Returns 4-way classification of required skills (demonstrated, claimed_but_unvalidated, not_demonstrated, not_assessed) with evidence.",
+)
+async def get_skill_gap(
+    sessionId: str,
+    db: AsyncSession = Depends(get_db),
+    skill_gap_service: SkillGapService = Depends(get_skill_gap_service),
+) -> SkillGapReport:
+    """Returns the comprehensive skill gap report comparing role requirements against candidate resume and answers."""
+    try:
+        session_uuid = uuid.UUID(sessionId)
+    except (ValueError, AttributeError):
+        raise InvalidSessionStateException(
+            message=f"Invalid sessionId format '{sessionId}'. Must be a valid UUID.",
+            details={"sessionId": sessionId},
+        )
+
+    result = await db.execute(
+        select(InterviewSession)
+        .options(
+            selectinload(InterviewSession.resume_analysis),
+            selectinload(InterviewSession.questions),
+            selectinload(InterviewSession.answers),
+        )
+        .where(InterviewSession.id == session_uuid)
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise ResourceNotFoundException(
+            resource="InterviewSession",
+            resource_id=sessionId,
+        )
+
+    return await skill_gap_service.generate_skill_gap_report(session=session)
+
+
 # Exact Endpoints - Adaptive Question Generation (Phase 3)
 @router.get(
     "/sessions/{sessionId}/next-question",
@@ -402,6 +498,98 @@ async def submit_answer(
 
 
 @router.post(
+    "/sessions/{sessionId}/answers/audio",
+    response_model=AudioAnswerResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Submit and Evaluate Audio Answer via Speech-to-Text",
+    description="Accepts candidate audio via multipart form data, transcribes it with faster-whisper, and evaluates it with Ollama.",
+)
+async def submit_audio_answer(
+    sessionId: str,
+    question_id: str = Form(..., description="UUID of the question being answered"),
+    file: UploadFile = File(..., description="Audio recording file (wav, mp3, m4a, webm, ogg, flac)"),
+    time_taken_seconds: Optional[int] = Form(default=None, description="Optional time spent formulating answer in seconds"),
+    db: AsyncSession = Depends(get_db),
+    evaluation_service: EvaluationService = Depends(get_evaluation_service),
+    transcription_service: TranscriptionService = Depends(get_transcription_service),
+) -> AudioAnswerResponse:
+    """Validates session and question, transcribes audio to text with faster-whisper, and evaluates candidate answer."""
+    # 1. Validate sessionId format
+    try:
+        session_uuid = uuid.UUID(sessionId)
+    except (ValueError, AttributeError):
+        raise InvalidSessionStateException(
+            message=f"Invalid sessionId format '{sessionId}'. Must be a valid UUID.",
+            details={"sessionId": sessionId},
+        )
+
+    # 2. Validate question_id format
+    try:
+        question_uuid = uuid.UUID(question_id)
+    except (ValueError, AttributeError):
+        raise InvalidSessionStateException(
+            message=f"Invalid question_id format '{question_id}'. Must be a valid UUID.",
+            details={"question_id": question_id},
+        )
+
+    # 3. Retrieve session
+    result = await db.execute(
+        select(InterviewSession).where(InterviewSession.id == session_uuid)
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise ResourceNotFoundException(
+            resource="InterviewSession",
+            resource_id=sessionId,
+        )
+
+    # 4. Validate session state
+    if session.status in ["completed", "abandoned"]:
+        raise InvalidSessionStateException(
+            message=f"Cannot submit answer: session is already '{session.status}'.",
+            details={"sessionId": sessionId, "status": session.status},
+        )
+
+    # 5. Retrieve question belonging to this session
+    q_result = await db.execute(
+        select(Question).where(
+            Question.id == question_uuid,
+            Question.session_id == session_uuid,
+        )
+    )
+    question = q_result.scalar_one_or_none()
+    if question is None:
+        raise ResourceNotFoundException(
+            resource="Question",
+            resource_id=question_id,
+        )
+
+    # 6. Validate and read audio file
+    audio_bytes, clean_filename = await transcription_service.validate_and_read_audio(file)
+
+    # 7. Real Speech-to-Text Transcription via faster-whisper
+    transcript = await transcription_service.transcribe_audio(audio_bytes, clean_filename)
+
+    # 8. Evaluate and persist answer using existing evaluation pipeline
+    answer_payload = AnswerSubmitRequest(
+        question_id=str(question.id),
+        answer_text=transcript,
+        time_taken_seconds=time_taken_seconds,
+    )
+    eval_response = await evaluation_service.evaluate_and_save_answer(
+        session=session,
+        question=question,
+        answer_payload=answer_payload,
+        db=db,
+    )
+
+    return AudioAnswerResponse(
+        **eval_response.model_dump(),
+        transcript=transcript,
+    )
+
+
+@router.post(
     "/sessions/{sessionId}/events",
     response_model=EventResponse,
     status_code=status.HTTP_200_OK,
@@ -429,6 +617,7 @@ async def record_events(
         .options(
             selectinload(InterviewSession.questions),
             selectinload(InterviewSession.answers),
+            selectinload(InterviewSession.events),
         )
         .where(InterviewSession.id == session_uuid)
     )
@@ -452,6 +641,13 @@ async def record_events(
         raise InvalidSessionStateException(
             message="Event type must be at least 2 characters long.",
             details={"event_type": payload.event_type},
+        )
+
+    # 4b. Guard against excessive event spam (maximum 500 events per session)
+    if session.events and len(session.events) >= 500:
+        raise InvalidSessionStateException(
+            message="Event limit reached for this interview session (maximum 500 events).",
+            details={"sessionId": sessionId, "event_count": len(session.events)},
         )
 
     # 5. Persist event
@@ -599,4 +795,4 @@ async def get_report(
         )
 
     # 3. Generate deterministic report
-    return report_service.generate_report(session)
+    return await report_service.generate_report(session)

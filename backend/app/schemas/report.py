@@ -53,13 +53,29 @@ class CompetencyPerformance(BaseModel):
     areas_for_improvement: List[str] = Field(default_factory=list)
 
 
+class IntegrityTimelineEntry(BaseModel):
+    """Single chronological event in the interview integrity timeline."""
+
+    timestamp: datetime
+    event_type: str
+    severity: str = "info"  # info, low, medium, high
+    description: str
+
+
 class IntegritySummary(BaseModel):
-    """Integrity telemetry analytics aggregated from events."""
+    """Integrity telemetry analytics aggregated from events with explainable risk assessment."""
 
     total_events: int
     tab_switches: int
     window_blurs: int
-    suspicious_activity_flag: bool
+    window_focuses: int = 0
+    pastes_detected: int = 0
+    suspicious_activity_flag: bool = False
+    risk_level: str = "low"  # low, medium, high
+    risk_score: float = 0.0  # 0.0 to 10.0 scale
+    risk_indicators: List[str] = Field(default_factory=list)
+    reasons_for_flags: List[str] = Field(default_factory=list)
+    timeline: List[IntegrityTimelineEntry] = Field(default_factory=list)
 
 
 class ReportSummaryMetrics(BaseModel):
@@ -90,3 +106,11 @@ class InterviewReportResponse(BaseModel):
     questions: List[QuestionWithAnswer] = Field(default_factory=list)
     competencies: List[CompetencyPerformance] = Field(default_factory=list)
     summary: ReportSummaryMetrics
+
+    # Candidate Decision Intelligence & Skill Gap Analysis
+    skill_gap_analysis: Optional[Any] = None
+    claimed_skills: List[Dict[str, Any]] = Field(default_factory=list)
+    demonstrated_skills: List[str] = Field(default_factory=list)
+    overall_assessment: Optional[str] = None
+    decision_recommendation: Optional[str] = None
+    suggested_follow_up_questions: List[str] = Field(default_factory=list)

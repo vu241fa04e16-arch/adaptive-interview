@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import uuid
@@ -16,8 +17,117 @@ from app.schemas.answer import AnswerEvaluationLLM, AnswerResponse, AnswerSubmit
 class EvaluationService:
     """Evaluates candidate interview answers using local Ollama structured inference."""
 
+    SKILL_VERIFICATION_THRESHOLD: float = 7.0
+
     def __init__(self, ollama_client: AsyncOllamaClient):
         self.ollama = ollama_client
+
+    @staticmethod
+    def _get_skill_terms(skill_name: str) -> List[str]:
+        """Generates canonical matching terms and aliases for a skill to prevent false matches."""
+        name_clean = skill_name.strip().lower()
+        if not name_clean:
+            return []
+        terms = [name_clean]
+        if name_clean.startswith("apache "):
+            terms.append(name_clean.replace("apache ", "").strip())
+
+        aliases = {
+            "postgresql": ["postgres", "psql"],
+            "kubernetes": ["k8s"],
+            "amazon web services": ["aws"],
+            "google cloud platform": ["gcp"],
+            "microsoft azure": ["azure"],
+            "distributed systems": ["distributed system", "distributed architecture"],
+            "kafka": ["apache kafka"],
+        }
+        if name_clean in aliases:
+            for alias in aliases[name_clean]:
+                if alias not in terms:
+                    terms.append(alias)
+        return terms
+
+    @classmethod
+    def _matches_skill_name(cls, skill_name: str, text: str) -> bool:
+        """
+        Matches skill terms using strict regex word boundaries to avoid false partial substring matches
+        (e.g., 'C' in 'cloud', 'Go' in 'algorithm', 'SQL' in 'NoSQL', 'Java' in 'JavaScript').
+        """
+        if not skill_name or not text:
+            return False
+        terms = cls._get_skill_terms(skill_name)
+        for term in terms:
+            pattern = rf"(?:\b|_){re.escape(term)}(?:\b|_)"
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        return False
+
+    def _evaluate_skill_evidence(
+        self,
+        skill_name: str,
+        question: Question,
+        answer_text: str,
+        evaluation: AnswerEvaluationLLM,
+    ) -> bool:
+        """
+        Determines whether the candidate's evaluated answer provides relevant evidence for a claimed skill.
+        Avoids partial substring matching alone and requires genuine technical relevance and evidence.
+        """
+        # 1. Check if question context targets this skill
+        question_context = (
+            f"{question.competency or ''} "
+            f"{question.question_text or ''} "
+            f"{' '.join(question.key_evaluation_criteria or [])}"
+        )
+        question_targets_skill = self._matches_skill_name(skill_name, question_context)
+
+        # 2. Check if answer text explicitly mentions the skill (with word boundary)
+        answer_mentions_skill = self._matches_skill_name(skill_name, answer_text)
+
+        # 3. Check if evaluation feedback or strengths explicitly reference the skill
+        eval_context = f"{' '.join(evaluation.strengths or [])} {evaluation.feedback or ''}"
+        eval_mentions_skill = self._matches_skill_name(skill_name, eval_context)
+
+        # 4. Check for pure non-answers or disclaimers with no technical substance
+        lower_ans = answer_text.strip().lower()
+        pure_non_answers = [
+            "i don't know",
+            "i do not know",
+            "not familiar",
+            "never used",
+            "haven't used",
+            "have not used",
+            "no experience",
+            "cannot answer",
+            "n/a",
+        ]
+        is_pure_non_answer = any(d in lower_ans for d in pure_non_answers) and len(lower_ans.split()) < 10
+        if is_pure_non_answer:
+            return False
+
+        # 5. Check substantive criteria overlap if question targets skill
+        if question_targets_skill:
+            if answer_mentions_skill:
+                return True
+
+            criteria = question.key_evaluation_criteria or []
+            criteria_words = set()
+            for c in criteria:
+                criteria_words.update(re.findall(r"\b[a-zA-Z]{4,}\b", c.lower()))
+            ans_words = set(re.findall(r"\b[a-zA-Z]{4,}\b", lower_ans))
+            has_criteria_overlap = bool(criteria_words.intersection(ans_words))
+
+            if (has_criteria_overlap or eval_mentions_skill) and len(evaluation.strengths or []) > 0:
+                return True
+
+            return False
+
+        # 6. If question does NOT target the skill:
+        # Candidate must have actively applied the skill in the answer AND evaluation confirmed strengths in it
+        if answer_mentions_skill and eval_mentions_skill and len(evaluation.strengths or []) > 0:
+            return True
+
+        return False
 
     async def evaluate_and_save_answer(
         self,
@@ -136,15 +246,43 @@ class EvaluationService:
         # Update matching claimed skills if present
         claimed_skills = list(comp_state.get("claimed_skills", []))
         for skill in claimed_skills:
-            skill_name = skill.get("name", "").strip().lower()
-            if skill_name and (skill_name in question.competency.lower() or question.competency.lower() in skill_name):
-                skill["verified"] = True
-                skill["demonstrated_score"] = new_answer.score
-                notes = list(skill.get("evaluation_notes", []))
-                notes.append(f"Score {new_answer.score}/10: {new_answer.feedback[:120]}")
-                skill["evaluation_notes"] = notes
-        comp_state["claimed_skills"] = claimed_skills
+            skill_name = skill.get("name", "").strip()
+            if not skill_name:
+                continue
 
+            is_relevant = self._evaluate_skill_evidence(
+                skill_name=skill_name,
+                question=question,
+                answer_text=answer_payload.answer_text,
+                evaluation=evaluation,
+            )
+
+            if is_relevant:
+                meets_threshold = new_answer.score >= self.SKILL_VERIFICATION_THRESHOLD
+                was_verified = bool(skill.get("verified", False))
+
+                if meets_threshold:
+                    skill["verified"] = True
+                    prev_score = skill.get("demonstrated_score")
+                    skill["demonstrated_score"] = (
+                        max(prev_score, new_answer.score)
+                        if prev_score is not None
+                        else new_answer.score
+                    )
+                    notes = list(skill.get("evaluation_notes", []))
+                    notes.append(f"Score {new_answer.score}/10: {new_answer.feedback[:120]}")
+                    skill["evaluation_notes"] = notes
+                else:
+                    skill["verified"] = was_verified
+                    if skill.get("demonstrated_score") is None:
+                        skill["demonstrated_score"] = new_answer.score
+                    notes = list(skill.get("evaluation_notes", []))
+                    notes.append(
+                        f"Attempted (Score {new_answer.score}/10, threshold {self.SKILL_VERIFICATION_THRESHOLD}): {new_answer.feedback[:120]}"
+                    )
+                    skill["evaluation_notes"] = notes
+
+        comp_state["claimed_skills"] = claimed_skills
         session.competency_state = comp_state
 
         await db.commit()

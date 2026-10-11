@@ -1,10 +1,12 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import InvalidSessionStateException
 from app.core.logging import logger
 from app.core.ollama_client import AsyncOllamaClient
+from app.models.answer import Answer
 from app.models.question import Question
 from app.models.session import InterviewSession
 from app.schemas.question import (
@@ -74,6 +76,7 @@ class AdaptiveEngine:
         self,
         session: InterviewSession,
         assessed_competencies: set,
+        existing_questions: Optional[List[Question]] = None,
     ) -> tuple[str, str, str]:
         """Deterministically selects the next competency to assess, prioritizing unassessed areas."""
         comp_state = session.competency_state or {}
@@ -109,8 +112,8 @@ class AdaptiveEngine:
                     f"Evaluating core role competency '{role_comp}' for {session.target_role}.",
                 )
 
-        existing_questions = session.questions if session.questions is not None else []
-        repeat_target = existing_questions[0].competency if existing_questions else "System Architecture"
+        questions = existing_questions if existing_questions is not None else []
+        repeat_target = questions[0].competency if questions else "System Architecture"
         return (
             repeat_target,
             "DEEP_PROBE_FOLLOW_UP",
@@ -176,29 +179,77 @@ class AdaptiveEngine:
         if session.status == "created":
             session.status = "in_progress"
 
-        raw_questions = session.questions
-        if isinstance(raw_questions, (list, tuple)):
-            existing_questions = list(raw_questions)
-        elif raw_questions is not None:
-            existing_questions = [raw_questions]
-        else:
-            existing_questions = []
+        try:
+            raw_questions = session.questions
+            if isinstance(raw_questions, (list, tuple)):
+                existing_questions = list(raw_questions)
+            elif raw_questions is not None:
+                existing_questions = [raw_questions]
+            else:
+                existing_questions = []
+        except Exception:
+            q_stmt = (
+                select(Question)
+                .where(Question.session_id == session.id)
+                .order_by(Question.sequence_number.asc())
+            )
+            q_res = await db.execute(q_stmt)
+            existing_questions = list(q_res.scalars().all())
 
         time_remaining = self._calculate_time_remaining(session)
         sequence_number = len(existing_questions) + 1
 
         # 3. Gather historical state
-        assessed_competencies = {q.competency.strip().lower() for q in existing_questions}
+        # A competency counts as assessed ONLY when its question has a submitted answer and evaluation
+        assessed_competencies: set = set()
+
+        # Query database for questions in this session with submitted and evaluated answers
+        stmt = (
+            select(Question.competency)
+            .join(Answer, Answer.question_id == Question.id)
+            .where(Question.session_id == session.id)
+        )
+        result = await db.execute(stmt)
+        for row in result.all():
+            if row[0]:
+                assessed_competencies.add(row[0].strip().lower())
+
+        # Check competency_state evaluations history
+        comp_state = session.competency_state or {}
+        for ev in comp_state.get("evaluations", []):
+            if isinstance(ev, dict) and "competency" in ev and ev.get("score") is not None:
+                assessed_competencies.add(str(ev["competency"]).strip().lower())
+
+        # Check uncommitted new answers in current db session
+        for obj in db.new:
+            if isinstance(obj, Answer) and obj.session_id == session.id:
+                for q in existing_questions:
+                    if q.id == obj.question_id:
+                        assessed_competencies.add(q.competency.strip().lower())
+
         previous_questions_text = [q.question_text for q in existing_questions]
 
         # Extract latest evaluation score if available (from competency_state or prior answer)
         latest_score: Optional[float] = None
-        comp_state = session.competency_state or {}
         if "latest_score" in comp_state and isinstance(comp_state["latest_score"], (int, float)):
             latest_score = float(comp_state["latest_score"])
+        elif assessed_competencies:
+            # Check latest answer score from DB if not in comp_state
+            latest_answer_stmt = (
+                select(Answer.score)
+                .where(Answer.session_id == session.id)
+                .order_by(Answer.created_at.desc())
+                .limit(1)
+            )
+            latest_ans_res = await db.execute(latest_answer_stmt)
+            latest_score_val = latest_ans_res.scalar_one_or_none()
+            if latest_score_val is not None:
+                latest_score = float(latest_score_val)
 
         # 4. Deterministic decision rules
-        competency, trigger, reason_base = self._determine_competency(session, assessed_competencies)
+        competency, trigger, reason_base = self._determine_competency(
+            session, assessed_competencies, existing_questions
+        )
         difficulty, diff_direction, score_used = self._determine_difficulty(session, previous_score=latest_score)
         question_type = self._determine_question_type(sequence_number, time_remaining)
 

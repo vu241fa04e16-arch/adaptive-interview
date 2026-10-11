@@ -49,3 +49,9 @@ class AnswerResponse(BaseModel):
     improvement_suggestions: List[str] = Field(default_factory=list)
     competency: str
     created_at: datetime
+
+
+class AudioAnswerResponse(AnswerResponse):
+    """API response returned by POST /api/sessions/{sessionId}/answers/audio."""
+
+    transcript: str = Field(description="Full speech-to-text transcript of candidate audio")

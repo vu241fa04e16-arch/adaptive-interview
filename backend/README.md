@@ -34,7 +34,17 @@ DATABASE_URL=postgresql+asyncpg://postgres:root@localhost:5432/adaptive_intervie
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=llama3.1
 OLLAMA_TIMEOUT_SECONDS=60.0
+
+# Speech-to-Text (STT) Whisper Configuration
+WHISPER_MODEL=tiny.en
+WHISPER_DEVICE=cpu
+WHISPER_COMPUTE_TYPE=int8
+MAX_AUDIO_SIZE_MB=25
 ```
+
+> [!NOTE]
+> **First-Time Speech-to-Text Model Download:**
+> The backend loads the faster-whisper model lazily on the first audio transcription request. The default model (`tiny.en`) requires approximately ~75 MB of disk space downloaded to the HuggingFace cache (`~/.cache/huggingface/hub`). For higher accuracy in multilingual setups, `base`, `small.en`, or `medium` can be configured via `WHISPER_MODEL` or `WHISPER_MODEL_SIZE`.
 
 ### 2. Install Dependencies
 ```powershell
@@ -63,6 +73,15 @@ Interactive API docs available at:
 python -m pytest -m "not live_ollama"
 ```
 
+### Speech-to-Text Tests
+```powershell
+# Mocked STT Unit Tests (Fast, CI-friendly)
+python -m pytest backend/tests/test_audio_answers.py backend/tests/test_transcription_service.py -q
+
+# Real Audio Transcription Verification (hits real faster-whisper model)
+python -m pytest backend/tests/test_real_audio_verification.py -s -v
+```
+
 ### Live Ollama Integration Test (Hits Local `llama3.1`)
 ```powershell
 python -m pytest -m "live_ollama" -s
@@ -75,14 +94,17 @@ python -m pytest
 
 ---
 
-## API Endpoints Status (Phase 1)
+## API Endpoints Status
 | Endpoint | Method | Phase Status | Description |
 | :--- | :--- | :--- | :--- |
 | `/api/health` | GET | **Active** | System liveness probe (PostgreSQL + Ollama). |
-| `/api/sessions` | POST | Reserved (Phase 2) | Session initialization. |
-| `/api/sessions/{sessionId}/resume` | POST | Reserved (Phase 2) | Resume upload & extraction. |
-| `/api/sessions/{sessionId}/next-question` | GET | Reserved (Phase 3) | Deterministic adaptive question generation. |
-| `/api/sessions/{sessionId}/answers` | POST | Reserved (Phase 4) | Real-time rubric-based answer evaluation. |
-| `/api/sessions/{sessionId}/events` | POST | Reserved (Phase 5) | Telemetry & integrity event stream. |
-| `/api/sessions/{sessionId}/complete` | POST | Reserved (Phase 5) | Session completion & report trigger. |
-| `/api/sessions/{sessionId}/report` | GET | Reserved (Phase 5) | Final candidate decision report. |
+| `/api/sessions` | POST | **Active** | Session initialization. |
+| `/api/sessions/{sessionId}/resume` | POST | **Active** | Resume upload & extraction. |
+| `/api/sessions/{sessionId}/next-question` | GET | **Active** | Deterministic adaptive question generation. |
+| `/api/sessions/{sessionId}/answers` | POST | **Active** | Real-time rubric-based answer evaluation (typed text). |
+| `/api/sessions/{sessionId}/answers/audio` | POST | **Active** | Real faster-whisper speech-to-text audio answer submission & evaluation. |
+| `/api/sessions/{sessionId}/job-description` | POST | **Active** | Job description submission & skill requirement extraction. |
+| `/api/sessions/{sessionId}/skill-gap` | GET | **Active** | 4-way skill gap analysis (JD vs Resume vs Live Evidence). |
+| `/api/sessions/{sessionId}/events` | POST | **Active** | Telemetry & integrity event stream with 500-event safety cap. |
+| `/api/sessions/{sessionId}/complete` | POST | **Active** | Session completion & report trigger. |
+| `/api/sessions/{sessionId}/report` | GET | **Active** | Final candidate decision report with integrity & skill gap synthesis. |

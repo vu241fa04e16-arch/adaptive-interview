@@ -172,3 +172,21 @@ class ConflictException(AppException):
             details=details,
         )
 
+
+class TranscriptionException(AppException):
+    """Raised when speech-to-text audio transcription encounters a failure."""
+
+    def __init__(
+        self,
+        message: str = "Audio transcription failed.",
+        status_code: int = 500,
+        error_code: str = "TRANSCRIPTION_FAILED",
+        details: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__(
+            message=message,
+            status_code=status_code,
+            error_code=error_code,
+            details=details,
+        )
+

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Optional
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -35,6 +35,11 @@ class SessionCreateRequest(BaseModel):
         le=120,
         description="Allocated interview time in minutes",
     )
+    job_description: Optional[str] = Field(
+        default=None,
+        max_length=50000,
+        description="Optional full text of target role job description for skill gap analysis",
+    )
 
 
 class SessionResponse(BaseModel):
@@ -49,3 +54,4 @@ class SessionResponse(BaseModel):
     time_limit_minutes: int
     created_at: datetime
     resume_uploaded: bool = False
+    job_description_provided: bool = False

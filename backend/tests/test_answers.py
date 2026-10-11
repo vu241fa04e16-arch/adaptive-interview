@@ -239,3 +239,266 @@ def test_submit_answer_ollama_malformed_returns_502(
     assert resp.json()["error"] == "AI_STRUCTURED_GENERATION_FAILED"
 
     app.dependency_overrides.clear()
+
+
+# ==============================================================================
+# Claimed-Skill Verification Tests
+# ==============================================================================
+
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
+from app.models.question import Question
+from app.models.session import InterviewSession
+from app.schemas.answer import AnswerSubmitRequest
+from app.services.evaluation_service import EvaluationService
+
+
+def make_mock_db() -> AsyncMock:
+    """Creates an AsyncMock database session where execute() returns a synchronous MagicMock Result."""
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = None
+
+    db = AsyncMock()
+    db.execute.return_value = mock_result
+    db.add = MagicMock()
+
+    async def mock_refresh(target):
+        if hasattr(target, "created_at") and getattr(target, "created_at", None) is None:
+            target.created_at = datetime.now(timezone.utc)
+        if hasattr(target, "id") and getattr(target, "id", None) is None:
+            target.id = uuid.uuid4()
+
+    db.refresh.side_effect = mock_refresh
+    return db
+
+
+def make_sample_session(claimed_skills=None) -> InterviewSession:
+    """Helper creating an in-memory InterviewSession with claimed skills."""
+    if claimed_skills is None:
+        claimed_skills = [
+            {
+                "name": "PostgreSQL",
+                "claimed_years": 6.0,
+                "claimed_proficiency": "Expert",
+                "verified": False,
+                "demonstrated_score": None,
+                "evaluation_notes": [],
+            },
+            {
+                "name": "Apache Kafka",
+                "claimed_years": 3.0,
+                "claimed_proficiency": "Intermediate",
+                "verified": False,
+                "demonstrated_score": None,
+                "evaluation_notes": [],
+            },
+            {
+                "name": "Distributed Systems",
+                "claimed_years": 5.0,
+                "claimed_proficiency": "Advanced",
+                "verified": False,
+                "demonstrated_score": None,
+                "evaluation_notes": [],
+            },
+        ]
+    return InterviewSession(
+        id=uuid.uuid4(),
+        candidate_name="Jane Doe",
+        candidate_email="jane@example.com",
+        target_role="Senior Backend Architect",
+        target_level="Senior",
+        time_limit_minutes=45,
+        status="in_progress",
+        competency_state={"claimed_skills": claimed_skills},
+    )
+
+
+def make_sample_question(
+    session_id: uuid.UUID,
+    competency: str = "PostgreSQL MVCC SSI versus Read Committed isolation tradeoffs",
+    question_text: str = "How do PostgreSQL MVCC snapshots prevent dirty reads?",
+    criteria: list[str] = None,
+) -> Question:
+    """Helper creating an in-memory Question."""
+    return Question(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        sequence_number=1,
+        question_text=question_text,
+        competency=competency,
+        difficulty="advanced",
+        question_type="technical_concept",
+        key_evaluation_criteria=criteria or ["Read Committed isolation", "Active transaction XID snapshot list"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_claimed_skill_verification_relevant_high_scoring_answer():
+    """Verifies that a relevant, high-scoring answer (>= 7.0) marks the claimed skill as verified."""
+    session = make_sample_session()
+    question = make_sample_question(session.id)
+    answer_payload = AnswerSubmitRequest(
+        question_id=str(question.id),
+        answer_text=(
+            "In PostgreSQL, Read Committed transactions take a new snapshot at the beginning of each query. "
+            "The snapshot contains xmin, xmax, and a list of active transaction IDs. Tuples created after xmax "
+            "or active in xip_list are ignored, thus dirty reads cannot occur."
+        ),
+    )
+
+    mock_ollama = AsyncMock()
+    mock_ollama.generate_structured.return_value = AnswerEvaluationLLM(
+        score=8.5,
+        strengths=["Accurate explanation of PostgreSQL MVCC snapshot isolation and xmin/xmax."],
+        weaknesses=[],
+        feedback="Solid architectural understanding of PostgreSQL transaction mechanics.",
+        improvement_suggestions=[],
+    )
+
+    db = make_mock_db()
+
+    service = EvaluationService(ollama_client=mock_ollama)
+    resp = await service.evaluate_and_save_answer(session, question, answer_payload, db)
+
+    assert resp.score == 8.5
+    claimed = session.competency_state["claimed_skills"]
+    by_name = {s["name"].lower(): s for s in claimed}
+
+    # PostgreSQL must be verified with score 8.5
+    assert by_name["postgresql"]["verified"] is True
+    assert by_name["postgresql"]["demonstrated_score"] == 8.5
+    assert any("Score 8.5/10" in n for n in by_name["postgresql"]["evaluation_notes"])
+
+    # Unrelated skills must remain unverified and untouched
+    assert by_name["apache kafka"]["verified"] is False
+    assert by_name["apache kafka"]["demonstrated_score"] is None
+    assert len(by_name["apache kafka"]["evaluation_notes"]) == 0
+
+    assert by_name["distributed systems"]["verified"] is False
+    assert by_name["distributed systems"]["demonstrated_score"] is None
+
+
+@pytest.mark.asyncio
+async def test_claimed_skill_verification_unrelated_answers():
+    """Verifies that unrelated answers (off-topic or about different domains) do not verify skills."""
+    service = EvaluationService(ollama_client=AsyncMock())
+    db = make_mock_db()
+
+    # Sub-case A: Off-topic answer to a PostgreSQL question
+    session_a = make_sample_session()
+    question_a = make_sample_question(session_a.id)
+    answer_a = AnswerSubmitRequest(
+        question_id=str(question_a.id),
+        answer_text="I enjoy baking sourdough bread with high hydration dough and olive oil on weekends.",
+    )
+
+    service.ollama.generate_structured.return_value = AnswerEvaluationLLM(
+        score=1.0,
+        strengths=[],
+        weaknesses=["Answer is completely off-topic and discusses baking instead of PostgreSQL."],
+        feedback="No relevant evidence or technical answer provided.",
+        improvement_suggestions=[],
+    )
+
+    await service.evaluate_and_save_answer(session_a, question_a, answer_a, db)
+
+    claimed_a = session_a.competency_state["claimed_skills"]
+    by_name_a = {s["name"].lower(): s for s in claimed_a}
+    assert by_name_a["postgresql"]["verified"] is False
+    assert by_name_a["postgresql"]["demonstrated_score"] is None
+    assert by_name_a["apache kafka"]["verified"] is False
+
+    # Sub-case B: High-scoring answer on an unrelated competency (Paxos for Distributed Systems)
+    session_b = make_sample_session()
+    question_b = make_sample_question(
+        session_b.id,
+        competency="Distributed Systems & Scalability",
+        question_text="Explain Raft log replication and leader election quorums.",
+        criteria=["Majority quorum", "Term numbers", "Heartbeat timeouts"],
+    )
+    answer_b = AnswerSubmitRequest(
+        question_id=str(question_b.id),
+        answer_text="In Raft distributed systems, consensus requires a majority quorum of node votes...",
+    )
+
+    service.ollama.generate_structured.return_value = AnswerEvaluationLLM(
+        score=9.0,
+        strengths=["Excellent grasp of distributed consensus algorithms and quorum mechanics."],
+        weaknesses=[],
+        feedback="Superb distributed systems answer.",
+        improvement_suggestions=[],
+    )
+
+    await service.evaluate_and_save_answer(session_b, question_b, answer_b, db)
+
+    claimed_b = session_b.competency_state["claimed_skills"]
+    by_name_b = {s["name"].lower(): s for s in claimed_b}
+    # Distributed Systems is verified because answer is relevant to it
+    assert by_name_b["distributed systems"]["verified"] is True
+    assert by_name_b["distributed systems"]["demonstrated_score"] == 9.0
+    # PostgreSQL is UNRELATED to Raft question/answer, so it must remain unverified!
+    assert by_name_b["postgresql"]["verified"] is False
+    assert by_name_b["postgresql"]["demonstrated_score"] is None
+    # Apache Kafka is UNRELATED, must remain unverified!
+    assert by_name_b["apache kafka"]["verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_claimed_skill_verification_relevant_low_scoring_answer():
+    """Verifies that a relevant answer on topic that scores below threshold (< 7.0) is not verified."""
+    session = make_sample_session()
+    question = make_sample_question(session.id)
+    answer_payload = AnswerSubmitRequest(
+        question_id=str(question.id),
+        answer_text=(
+            "PostgreSQL locks every table when reading data so dirty reads are prevented. "
+            "I do not know how MVCC or xmin works."
+        ),
+    )
+
+    mock_ollama = AsyncMock()
+    mock_ollama.generate_structured.return_value = AnswerEvaluationLLM(
+        score=3.5,
+        strengths=["Mentioned PostgreSQL table locking concept."],
+        weaknesses=["Incorrect claim that reading rows locks tables in PostgreSQL.", "Lacks understanding of MVCC."],
+        feedback="Candidate demonstrates fundamental misunderstanding of PostgreSQL MVCC.",
+        improvement_suggestions=["Review MVCC snapshot mechanics."],
+    )
+
+    db = make_mock_db()
+
+    service = EvaluationService(ollama_client=mock_ollama)
+    resp = await service.evaluate_and_save_answer(session, question, answer_payload, db)
+
+    assert resp.score == 3.5
+    claimed = session.competency_state["claimed_skills"]
+    by_name = {s["name"].lower(): s for s in claimed}
+
+    # PostgreSQL was attempted, but score 3.5 is below the 7.0 threshold, so verified is False!
+    assert by_name["postgresql"]["verified"] is False
+    assert by_name["postgresql"]["demonstrated_score"] == 3.5
+    assert any("threshold" in n.lower() or "attempted" in n.lower() for n in by_name["postgresql"]["evaluation_notes"])
+
+    # Kafka and Distributed Systems remain unverified
+    assert by_name["apache kafka"]["verified"] is False
+    assert by_name["distributed systems"]["verified"] is False
+
+
+def test_no_partial_substring_matching_alone():
+    """Verifies that skill matching enforces word boundaries and does not match partial substrings alone."""
+    # 1. Exact and word boundary matching should succeed
+    assert EvaluationService._matches_skill_name("Go", "Implemented backend microservices in Go.")
+    assert EvaluationService._matches_skill_name("C", "Wrote low-level drivers in C.")
+    assert EvaluationService._matches_skill_name("SQL", "Optimized complex SQL queries.")
+    assert EvaluationService._matches_skill_name("Java", "Engineered Java Spring Boot microservices.")
+    assert EvaluationService._matches_skill_name("PostgreSQL", "Configured PostgreSQL MVCC transaction isolation.")
+    assert EvaluationService._matches_skill_name("PostgreSQL", "Tuned Postgres connection pools.")
+    assert EvaluationService._matches_skill_name("Apache Kafka", "Managed Kafka consumer lag.")
+
+    # 2. Substrings inside other words must NEVER match
+    assert not EvaluationService._matches_skill_name("Go", "Sorting algorithm efficiency and category.")
+    assert not EvaluationService._matches_skill_name("C", "Cloud computing concurrency model.")
+    assert not EvaluationService._matches_skill_name("SQL", "Document-oriented NoSQL storage.")
+    assert not EvaluationService._matches_skill_name("Java", "Client-side JavaScript React application.")
+    assert not EvaluationService._matches_skill_name("Kafka", "Kafkaesque bureaucracy in software teams.")
+

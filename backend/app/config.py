@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import List, Union
+from typing import List, Optional, Union
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -32,6 +32,27 @@ class Settings(BaseSettings):
     MAX_RESUME_SIZE_MB: int = 10
     UPLOAD_DIR: str = "uploads"
     ALLOWED_RESUME_EXTENSIONS: List[str] = [".pdf", ".docx"]
+
+    # Audio Speech-to-Text (STT) Configuration
+    WHISPER_MODEL: str = "tiny.en"
+    WHISPER_MODEL_SIZE: Optional[str] = None
+    WHISPER_DEVICE: str = "cpu"
+    WHISPER_COMPUTE_TYPE: str = "int8"
+    MAX_AUDIO_SIZE_MB: int = 25
+    ALLOWED_AUDIO_EXTENSIONS: List[str] = [
+        ".wav",
+        ".mp3",
+        ".m4a",
+        ".webm",
+        ".ogg",
+        ".flac",
+        ".aac",
+        ".mp4",
+    ]
+
+    @property
+    def effective_whisper_model(self) -> str:
+        return self.WHISPER_MODEL_SIZE or self.WHISPER_MODEL or "tiny.en"
 
     # Cross-Origin Resource Sharing (CORS)
     ALLOWED_ORIGINS: Union[List[str], str] = [

@@ -154,6 +154,14 @@ def test_get_report_full_interview_lifecycle(
     assert validated.summary.integrity.tab_switches >= 1
     assert validated.summary.integrity.suspicious_activity_flag is False
 
+    # Verify Decision Intelligence & Skill Gap additions
+    assert validated.skill_gap_analysis is not None
+    assert validated.overall_assessment is not None
+    assert validated.decision_recommendation is not None
+    assert len(validated.summary.integrity.timeline) >= 1
+    assert validated.summary.integrity.risk_level in ["low", "medium", "high"]
+    assert len(validated.suggested_follow_up_questions) >= 1
+
     app.dependency_overrides.clear()
 
 

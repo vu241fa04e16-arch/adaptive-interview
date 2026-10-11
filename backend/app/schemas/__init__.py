@@ -16,6 +16,7 @@ from app.schemas.answer import (
     AnswerSubmitRequest,
     AnswerEvaluationLLM,
     AnswerResponse,
+    AudioAnswerResponse,
 )
 from app.schemas.event import (
     EventCreateRequest,
@@ -27,9 +28,15 @@ from app.schemas.report import (
     AnswerDetail,
     QuestionWithAnswer,
     CompetencyPerformance,
+    IntegrityTimelineEntry,
     IntegritySummary,
     ReportSummaryMetrics,
     InterviewReportResponse,
+)
+from app.schemas.skill_gap import (
+    JobDescriptionSubmitRequest,
+    RequiredSkillItem,
+    SkillGapReport,
 )
 
 __all__ = [
@@ -49,6 +56,7 @@ __all__ = [
     "AnswerSubmitRequest",
     "AnswerEvaluationLLM",
     "AnswerResponse",
+    "AudioAnswerResponse",
     "EventCreateRequest",
     "InterviewProgress",
     "EventResponse",
@@ -56,7 +64,11 @@ __all__ = [
     "AnswerDetail",
     "QuestionWithAnswer",
     "CompetencyPerformance",
+    "IntegrityTimelineEntry",
     "IntegritySummary",
     "ReportSummaryMetrics",
     "InterviewReportResponse",
+    "JobDescriptionSubmitRequest",
+    "RequiredSkillItem",
+    "SkillGapReport",
 ]
