@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Literal, Optional
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 
 
 class SessionCreateRequest(BaseModel):
@@ -40,6 +40,27 @@ class SessionCreateRequest(BaseModel):
         max_length=50000,
         description="Optional full text of target role job description for skill gap analysis",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_aliases(cls, data: object) -> object:
+        if isinstance(data, dict):
+            d = dict(data)
+            if "candidate_name" not in d and "name" in d:
+                d["candidate_name"] = d["name"]
+            if "candidate_email" not in d and "email" in d:
+                d["candidate_email"] = d["email"]
+            if "target_role" not in d and "targetRole" in d:
+                d["target_role"] = d["targetRole"]
+            if "target_level" not in d and "targetLevel" in d:
+                d["target_level"] = d["targetLevel"]
+            if "time_limit_minutes" not in d and "timeLimitMinutes" in d:
+                d["time_limit_minutes"] = d["timeLimitMinutes"]
+            if "job_description" not in d and "jobDescription" in d:
+                d["job_description"] = d["jobDescription"]
+            return d
+        return data
+
 
 
 class SessionResponse(BaseModel):

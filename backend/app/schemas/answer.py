@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AnswerSubmitRequest(BaseModel):
@@ -9,6 +9,20 @@ class AnswerSubmitRequest(BaseModel):
     question_id: str = Field(description="UUID of the question being answered")
     answer_text: str = Field(min_length=1, description="Candidate answer content")
     time_taken_seconds: Optional[int] = Field(default=None, ge=0, description="Optional time spent formulating answer")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_aliases(cls, data: object) -> object:
+        if isinstance(data, dict):
+            d = dict(data)
+            if "question_id" not in d and "questionId" in d:
+                d["question_id"] = d["questionId"]
+            if "answer_text" not in d and "text" in d:
+                d["answer_text"] = d["text"]
+            if "time_taken_seconds" not in d and "timeTakenSeconds" in d:
+                d["time_taken_seconds"] = d["timeTakenSeconds"]
+            return d
+        return data
 
 
 class AnswerEvaluationLLM(BaseModel):
@@ -49,6 +63,7 @@ class AnswerResponse(BaseModel):
     improvement_suggestions: List[str] = Field(default_factory=list)
     competency: str
     created_at: datetime
+    has_more: bool = Field(default=True, description="Whether additional adaptive questions remain")
 
 
 class AudioAnswerResponse(AnswerResponse):

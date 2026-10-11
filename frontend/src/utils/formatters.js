@@ -24,7 +24,12 @@ export function formatTime(totalSeconds) {
  */
 export function formatScore(score) {
   if (score === undefined || score === null || isNaN(score)) return '0%';
-  const normalized = score > 1 ? score : score * 100;
+  let normalized = Number(score);
+  if (normalized <= 1) {
+    normalized = normalized * 100;
+  } else if (normalized <= 10) {
+    normalized = normalized * 10;
+  }
   return `${Math.round(normalized)}%`;
 }
 

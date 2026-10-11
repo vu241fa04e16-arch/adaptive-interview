@@ -269,3 +269,106 @@ def test_complete_interview_lifecycle_e2e(
     assert resp_post_ans.json()["error"] == "INVALID_SESSION_STATE"
 
     app.dependency_overrides.clear()
+
+
+def test_frontend_api_compatibility_e2e(
+    client: TestClient,
+    sample_docx_bytes: bytes,
+    mock_e2e_ollama,
+):
+    """Verifies that the backend accepts frontend request formats (name, email, targetRole, questionId, text, batch events) and returns UI-compatible responses."""
+    app.dependency_overrides[get_ollama_client] = lambda: mock_e2e_ollama
+
+    # 1. Create session using frontend field names (name, email, targetRole)
+    resp_create = client.post(
+        "/api/sessions",
+        json={
+            "name": "Sarah Connor",
+            "email": "sarah.connor@example.com",
+            "targetRole": "Senior Systems Architect",
+            "targetLevel": "Senior",
+            "timeLimitMinutes": 45,
+        },
+    )
+    assert resp_create.status_code == 201
+    s_data = resp_create.json()
+    session_id = s_data["sessionId"]
+    assert s_data["candidate_name"] == "Sarah Connor"
+    assert s_data["target_role"] == "Senior Systems Architect"
+
+    # 2. Upload resume and verify skills and experienceYears are returned for UI
+    files = {"file": ("resume.docx", sample_docx_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")}
+    resp_resume = client.post(f"/api/sessions/{session_id}/resume", files=files)
+    assert resp_resume.status_code == 200
+    r_json = resp_resume.json()
+    assert "skills" in r_json
+    assert isinstance(r_json["skills"], list)
+    assert len(r_json["skills"]) > 0
+    assert "experienceYears" in r_json
+    assert r_json["experienceYears"] >= 1.0
+
+    # 3. Get next question and verify has_more
+    resp_q = client.get(f"/api/sessions/{session_id}/next-question")
+    assert resp_q.status_code == 200
+    q_json = resp_q.json()
+    assert q_json["has_more"] is True
+    question_id = q_json["question_id"]
+
+    # 4. Submit answer using frontend payload format (questionId, text)
+    resp_ans = client.post(
+        f"/api/sessions/{session_id}/answers",
+        json={
+            "questionId": question_id,
+            "text": "PostgreSQL MVCC ensures snapshot isolation by keeping older row tuple versions.",
+        },
+    )
+    assert resp_ans.status_code == 200
+    ans_json = resp_ans.json()
+    assert ans_json["question_id"] == question_id
+    assert ans_json["score"] > 0
+    assert "has_more" in ans_json
+
+    # 5. Submit batched events using frontend format ({ events: [ { type, details } ] })
+    resp_evt = client.post(
+        f"/api/sessions/{session_id}/events",
+        json={
+            "events": [
+                {"type": "visibilitychange", "details": "tab switched to docs"},
+                {"type": "blur", "details": "window lost focus"},
+            ]
+        },
+    )
+    assert resp_evt.status_code == 200
+    evt_json = resp_evt.json()
+    assert evt_json["sessionId"] == session_id
+
+    # 6. Submit job description and fetch skill gap
+    resp_jd = client.post(
+        f"/api/sessions/{session_id}/job-description",
+        json={
+            "job_description": "We need a Senior Systems Architect proficient in PostgreSQL, Distributed Systems, and Kafka."
+        },
+    )
+    assert resp_jd.status_code == 200
+    jd_json = resp_jd.json()
+    assert jd_json["job_description_provided"] is True
+
+    resp_gap = client.get(f"/api/sessions/{session_id}/skill-gap")
+    assert resp_gap.status_code == 200
+    gap_json = resp_gap.json()
+    assert "required_skills" in gap_json
+
+    # 7. Complete session and get comprehensive report
+    resp_comp = client.post(f"/api/sessions/{session_id}/complete")
+    assert resp_comp.status_code == 200
+
+    resp_rep = client.get(f"/api/sessions/{session_id}/report")
+    assert resp_rep.status_code == 200
+    rep_json = resp_rep.json()
+    assert rep_json["candidate_name"] == "Sarah Connor"
+    assert rep_json["status"] == "completed"
+    assert rep_json["summary"]["integrity"]["total_events"] >= 2
+    assert rep_json["skill_gap_analysis"] is not None
+
+    app.dependency_overrides.clear()
+

@@ -293,6 +293,9 @@ class EvaluationService:
             f"Competency '{question.competency}' updated."
         )
 
+        # Check if more questions remain (standard adaptive session length: 4 questions)
+        has_more_questions = question.sequence_number < 4
+
         return AnswerResponse(
             sessionId=str(session.id),
             answer_id=str(new_answer.id),
@@ -304,4 +307,5 @@ class EvaluationService:
             improvement_suggestions=new_answer.improvement_suggestions,
             competency=question.competency,
             created_at=new_answer.created_at,
+            has_more=has_more_questions,
         )

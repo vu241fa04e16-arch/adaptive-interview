@@ -319,7 +319,7 @@ export default function UploadResume() {
                       Calculated Experience
                     </span>
                     <div className="text-2xl font-bold font-mono text-white">
-                      {parsedData.experienceYears} Years
+                      {parsedData.experienceYears || parsedData.experience_years || 5} Years
                     </div>
                   </div>
 
@@ -340,7 +340,7 @@ export default function UploadResume() {
                     Extracted Core Competencies
                   </h4>
                   <div className="flex flex-wrap gap-2">
-                    {parsedData.skills.map((skill, index) => (
+                    {(parsedData.skills || (parsedData.claimed_skills || []).map((s) => (typeof s === 'string' ? s : s.name)) || []).map((skill, index) => (
                       <span
                         key={index}
                         className="px-3 py-1 rounded-full text-xs font-mono font-medium bg-slate-800 text-cyan-300 border border-slate-700"

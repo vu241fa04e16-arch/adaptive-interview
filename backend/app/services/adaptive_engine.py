@@ -339,4 +339,5 @@ class AdaptiveEngine:
             time_remaining_seconds=time_remaining,
             key_evaluation_criteria=new_question.key_evaluation_criteria,
             adaptation_context=adaptation_context,
+            has_more=True,
         )

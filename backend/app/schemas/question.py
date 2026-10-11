@@ -24,6 +24,8 @@ class QuestionResponse(BaseModel):
     time_remaining_seconds: int
     key_evaluation_criteria: List[str] = Field(default_factory=list)
     adaptation_context: Optional[AdaptationContext] = None
+    has_more: bool = Field(default=True, description="Whether more adaptive questions remain")
+
 
 
 class GeneratedQuestionLLM(BaseModel):

@@ -277,6 +277,10 @@ async def upload_resume(
     await db.commit()
     logger.info(f"Resume analysis successfully stored for session {sessionId}. Extracted {len(analysis.claimed_skills)} skills and {len(analysis.projects)} projects.")
 
+    flat_skills = [s.name for s in analysis.claimed_skills]
+    years_list = [s.claimed_experience_years for s in analysis.claimed_skills if s.claimed_experience_years is not None]
+    calc_years = max(years_list) if years_list else 5.0
+
     return ResumeUploadResponse(
         sessionId=sessionId,
         resume_parsed=True,
@@ -287,6 +291,8 @@ async def upload_resume(
         claimed_skills=analysis.claimed_skills,
         projects=analysis.projects,
         suggested_focus_areas=analysis.suggested_focus_areas,
+        skills=flat_skills,
+        experienceYears=calc_years,
         message="Resume analyzed successfully. Interview competency profile primed.",
     )
 
@@ -635,31 +641,56 @@ async def record_events(
             details={"sessionId": sessionId, "status": session.status},
         )
 
-    # 4. Validate event_type
-    clean_event_type = payload.event_type.strip()
-    if len(clean_event_type) < 2:
+    # 4. Prepare events to persist
+    events_to_add: List[SessionEvent] = []
+    if payload.events and len(payload.events) > 0:
+        for ev in payload.events:
+            clean_type = ev.event_type.strip()
+            if len(clean_type) >= 2:
+                ev_time = ev.timestamp or datetime.now(timezone.utc)
+                events_to_add.append(
+                    SessionEvent(
+                        session_id=session.id,
+                        event_type=clean_type,
+                        event_data=ev.event_data,
+                        timestamp=ev_time,
+                    )
+                )
+    elif payload.event_type:
+        clean_event_type = payload.event_type.strip()
+        if len(clean_event_type) < 2:
+            raise InvalidSessionStateException(
+                message="Event type must be at least 2 characters long.",
+                details={"event_type": payload.event_type},
+            )
+        event_timestamp = payload.timestamp or datetime.now(timezone.utc)
+        events_to_add.append(
+            SessionEvent(
+                session_id=session.id,
+                event_type=clean_event_type,
+                event_data=payload.event_data,
+                timestamp=event_timestamp,
+            )
+        )
+    else:
         raise InvalidSessionStateException(
-            message="Event type must be at least 2 characters long.",
-            details={"event_type": payload.event_type},
+            message="Either 'event_type' or 'events' list must be provided.",
+            details={},
         )
 
     # 4b. Guard against excessive event spam (maximum 500 events per session)
-    if session.events and len(session.events) >= 500:
+    current_count = len(session.events) if session.events else 0
+    if current_count + len(events_to_add) > 500:
         raise InvalidSessionStateException(
             message="Event limit reached for this interview session (maximum 500 events).",
-            details={"sessionId": sessionId, "event_count": len(session.events)},
+            details={"sessionId": sessionId, "event_count": current_count},
         )
 
-    # 5. Persist event
-    event_timestamp = payload.timestamp or datetime.now(timezone.utc)
-    new_event = SessionEvent(
-        session_id=session.id,
-        event_type=clean_event_type,
-        event_data=payload.event_data,
-        timestamp=event_timestamp,
-    )
-    db.add(new_event)
+    # 5. Persist events
+    for ev_item in events_to_add:
+        db.add(ev_item)
     await db.commit()
+    new_event = events_to_add[-1]
     await db.refresh(new_event)
 
     # 6. Compute progress

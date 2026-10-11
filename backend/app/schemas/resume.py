@@ -1,5 +1,5 @@
 from typing import List, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ClaimedSkill(BaseModel):
@@ -61,3 +61,29 @@ class ResumeUploadResponse(BaseModel):
     projects: List[ProjectSummary]
     suggested_focus_areas: List[str]
     message: str = "Resume analyzed successfully. Interview competency profile primed."
+    skills: List[str] = Field(default_factory=list, description="Flat list of extracted skill names for UI convenience")
+    experienceYears: float = Field(default=5.0, description="Calculated years of experience for UI convenience")
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_ui_fields(cls, data: object) -> object:
+        if isinstance(data, dict):
+            d = dict(data)
+            if "skills" not in d and "claimed_skills" in d:
+                c_skills = d["claimed_skills"]
+                d["skills"] = [
+                    s.name if hasattr(s, "name") else (s.get("name") if isinstance(s, dict) else str(s))
+                    for s in c_skills
+                ]
+            if "experienceYears" not in d and "claimed_skills" in d:
+                c_skills = d["claimed_skills"]
+                years = [
+                    (s.claimed_experience_years if hasattr(s, "claimed_experience_years") else s.get("claimed_experience_years"))
+                    for s in c_skills
+                    if (hasattr(s, "claimed_experience_years") or (isinstance(s, dict) and s.get("claimed_experience_years")))
+                ]
+                valid_years = [y for y in years if isinstance(y, (int, float))]
+                d["experienceYears"] = max(valid_years) if valid_years else 5.0
+            return d
+        return data
+
