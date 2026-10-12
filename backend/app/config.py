@@ -31,6 +31,16 @@ class Settings(BaseSettings):
     # Database Configuration (PostgreSQL 18)
     DATABASE_URL: str = "postgresql+asyncpg://postgres:root@localhost:5432/adaptive_interview"
 
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def parse_database_url(cls, value: str) -> str:
+        if isinstance(value, str):
+            if value.startswith("postgres://"):
+                return value.replace("postgres://", "postgresql+asyncpg://", 1)
+            elif value.startswith("postgresql://") and not value.startswith("postgresql+asyncpg://"):
+                return value.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return value
+
     # Groq Cloud API Configuration
     GROQ_API_KEY: Optional[str] = None
     GROQ_MODEL: str = "qwen/qwen3.8-27b"
@@ -80,6 +90,7 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174",
         "http://127.0.0.1:5176",
+        "https://adaptive-interview-nexora-fb8f.vercel.app",
     ]
 
     @field_validator("ALLOWED_ORIGINS", mode="before")

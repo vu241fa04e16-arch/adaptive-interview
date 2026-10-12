@@ -35,6 +35,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Groq API initial health probe encountered an error: {e}")
 
+    # Ensure database schema is present
+    try:
+        from app.database import Base
+        import app.models  # noqa: F401
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database schema validated and initialized successfully.")
+    except Exception as e:
+        logger.warning(f"Database schema initialization notice: {e}")
+
     yield
 
     # Graceful shutdown

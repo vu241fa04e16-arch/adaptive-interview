@@ -198,7 +198,7 @@ async def test_groq_structured_generation_schema_mismatch_raises():
 async def test_groq_missing_api_key_raises_provider_unavailable():
     """Verifies that an unconfigured GROQ_API_KEY raises AIProviderUnavailableException."""
     client = AsyncGroqClient(
-        api_key=None,
+        api_key="",
         base_url="https://api.groq.com/openai/v1",
         model="llama-3.3-70b-versatile",
     )
@@ -345,7 +345,7 @@ async def test_groq_check_health_healthy():
 async def test_groq_check_health_missing_api_key():
     """Verifies check_health reports unavailable with helpful error when GROQ_API_KEY is unset."""
     client = AsyncGroqClient(
-        api_key=None,
+        api_key="",
         base_url="https://api.groq.com/openai/v1",
         model="llama-3.3-70b-versatile",
     )

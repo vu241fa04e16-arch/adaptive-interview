@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any, Dict, List, Optional, Type, TypeVar
 import httpx
@@ -29,7 +30,7 @@ class AsyncGroqClient:
         timeout_seconds: Optional[float] = None,
     ):
         settings: Settings = get_settings()
-        self.api_key = api_key or settings.GROQ_API_KEY
+        self.api_key = api_key if api_key is not None else settings.GROQ_API_KEY
         self.base_url = (base_url or settings.GROQ_BASE_URL).rstrip("/")
         self.model = model or settings.GROQ_MODEL
         self.timeout_seconds = timeout_seconds or settings.GROQ_TIMEOUT_SECONDS
@@ -219,55 +220,68 @@ class AsyncGroqClient:
 
         # Ensure a sufficient completion token ceiling for JSON generation if unspecified
         if "max_tokens" not in payload:
-            payload["max_tokens"] = 1024
+            payload["max_tokens"] = 512
 
-        try:
-            client = await self._get_client()
-            response = await client.post("/chat/completions", json=payload)
-            response.raise_for_status()
-            result = response.json()
-            choices = result.get("choices", [])
-            if not choices:
-                raise AIStructuredGenerationException(
-                    message="Groq returned empty choices in completion response.",
-                    details={"raw_response": result},
-                )
-            content = choices[0].get("message", {}).get("content", "")
-            return content
+        retries = 2
+        for attempt in range(retries + 1):
+            try:
+                client = await self._get_client()
+                response = await client.post("/chat/completions", json=payload)
+                response.raise_for_status()
+                result = response.json()
+                choices = result.get("choices", [])
+                if not choices:
+                    raise AIStructuredGenerationException(
+                        message="Groq returned empty choices in completion response.",
+                        details={"raw_response": result},
+                    )
+                content = choices[0].get("message", {}).get("content", "")
+                return content
 
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            logger.error(f"Groq connection error at {self.base_url}: {e}")
-            raise AIProviderUnavailableException(
-                message=f"Failed to connect to Groq API at {self.base_url}.",
-                details={"base_url": self.base_url, "configured_model": self.model, "error": str(e)},
-            ) from e
-        except httpx.TimeoutException as e:
-            logger.error(f"Groq timeout after {self.timeout_seconds}s: {e}")
-            raise AIProviderUnavailableException(
-                message=f"Groq inference timed out after {self.timeout_seconds}s.",
-                details={"timeout_seconds": self.timeout_seconds, "configured_model": self.model},
-            ) from e
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Groq HTTP error {e.response.status_code}: {e.response.text}")
-            if e.response.status_code == 404:
-                raise ModelNotAvailableException(
-                    model_name=self.model,
-                    details={"base_url": self.base_url, "groq_response": e.response.text},
-                ) from e
-            elif e.response.status_code == 401:
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                logger.error(f"Groq connection error at {self.base_url}: {e}")
                 raise AIProviderUnavailableException(
-                    message="Groq API authentication failed (HTTP 401 Unauthorized). Verify GROQ_API_KEY.",
-                    details={"status_code": 401, "body": e.response.text},
+                    message=f"Failed to connect to Groq API at {self.base_url}.",
+                    details={"base_url": self.base_url, "configured_model": self.model, "error": str(e)},
                 ) from e
-            elif e.response.status_code == 429:
+            except httpx.TimeoutException as e:
+                logger.error(f"Groq timeout after {self.timeout_seconds}s: {e}")
                 raise AIProviderUnavailableException(
-                    message="Groq API rate limit reached (HTTP 429).",
-                    details={"status_code": 429, "body": e.response.text},
+                    message=f"Groq inference timed out after {self.timeout_seconds}s.",
+                    details={"timeout_seconds": self.timeout_seconds, "configured_model": self.model},
                 ) from e
-            raise AIProviderUnavailableException(
-                message=f"Groq API returned HTTP {e.response.status_code}.",
-                details={"status_code": e.response.status_code, "body": e.response.text},
-            ) from e
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Groq HTTP error {e.response.status_code}: {e.response.text}")
+                if e.response.status_code == 429 and attempt < retries:
+                    retry_after = 3.0
+                    if "retry-after" in e.response.headers:
+                        try:
+                            retry_after = float(e.response.headers["retry-after"])
+                        except ValueError:
+                            pass
+                    logger.warning(f"Groq 429 rate limit reached. Retrying in {retry_after}s (attempt {attempt+1}/{retries})...")
+                    await asyncio.sleep(min(retry_after, 6.0))
+                    continue
+
+                if e.response.status_code == 404:
+                    raise ModelNotAvailableException(
+                        model_name=self.model,
+                        details={"base_url": self.base_url, "groq_response": e.response.text},
+                    ) from e
+                elif e.response.status_code == 401:
+                    raise AIProviderUnavailableException(
+                        message="Groq API authentication failed (HTTP 401 Unauthorized). Verify GROQ_API_KEY.",
+                        details={"status_code": 401, "body": e.response.text},
+                    ) from e
+                elif e.response.status_code == 429:
+                    raise AIProviderUnavailableException(
+                        message="Groq API rate limit reached (HTTP 429).",
+                        details={"status_code": 429, "body": e.response.text},
+                    ) from e
+                raise AIProviderUnavailableException(
+                    message=f"Groq API returned HTTP {e.response.status_code}.",
+                    details={"status_code": e.response.status_code, "body": e.response.text},
+                ) from e
 
     @staticmethod
     def _salvage_truncated_json(text: str) -> Optional[Any]:
@@ -316,16 +330,28 @@ class AsyncGroqClient:
         if system_prompt:
             base_system = f"{system_prompt}\n\n{base_system}"
 
+        user_content = prompt if "json" in prompt.lower() else f"{prompt}\n\nPlease respond with a valid JSON object."
         messages = [
             {"role": "system", "content": base_system},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": user_content},
         ]
 
-        raw_response = await self.generate_chat(
-            messages=messages,
-            format="json",
-            options=options,
-        )
+        try:
+            raw_response = await self.generate_chat(
+                messages=messages,
+                format="json",
+                options=options,
+            )
+        except AIProviderUnavailableException as e:
+            if e.details and "json_validate_failed" in str(e.details):
+                logger.warning("Groq json_validate_failed encountered; retrying prompt without strict JSON mode constraint...")
+                raw_response = await self.generate_chat(
+                    messages=messages,
+                    format=None,
+                    options=options,
+                )
+            else:
+                raise
 
         # Parse JSON
         cleaned = raw_response.strip()
